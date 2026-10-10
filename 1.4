@@ -1,0 +1,221 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+enum Status {
+    STATUS_OK = 0,
+    STATUS_ERR_ARGC,             
+    STATUS_ERR_FLAG,             
+    STATUS_ERR_OPEN_INPUT,      
+    STATUS_ERR_OPEN_OUTPUT,      
+    STATUS_ERR_READ,             
+    STATUS_ERR_WRITE,           
+    STATUS_ERR_MEMORY,           
+    STATUS_ERR_CLOSE             
+};
+
+static enum Status parse_flag(const char *flag, char *action, int *has_n) {
+    if (flag == NULL || action == NULL || has_n == NULL) return STATUS_ERR_FLAG;
+
+    size_t len = strlen(flag);
+    if (len < 2 || len > 3) return STATUS_ERR_FLAG;
+    if (flag[0] != '-' && flag[0] != '/') return STATUS_ERR_FLAG;
+
+    *has_n = 0;
+    size_t i = 1;
+    if (flag[i] == 'n') { *has_n = 1; ++i; }
+
+    if (i + 1 != len) return STATUS_ERR_FLAG;
+
+    char c = flag[i];
+    if (c != 'd' && c != 'i' && c != 's' && c != 'a') return STATUS_ERR_FLAG;
+
+    *action = c;
+    return STATUS_OK;
+}
+
+static enum Status build_output_name(const char *input, char **out) {
+    if (input == NULL || out == NULL) return STATUS_ERR_MEMORY;
+
+    size_t len = strlen(input);
+    char *name = (char *)malloc(len + 5);
+    if (name == NULL) return STATUS_ERR_MEMORY;
+
+    memcpy(name, "out_", 4);
+    memcpy(name + 4, input, len + 1);  
+
+    *out = name;
+    return STATUS_OK;
+}
+
+static enum Status handle_d(FILE *in, FILE *out) {
+    if (in == NULL || out == NULL) return STATUS_ERR_READ;
+    int c;
+    while ((c = fgetc(in)) != EOF) {
+        if (!isdigit((unsigned char)c)) {
+            if (fputc(c, out) == EOF) return STATUS_ERR_WRITE;
+        }
+    }
+    if (ferror(in)) return STATUS_ERR_READ;
+    return STATUS_OK;
+}
+
+static enum Status handle_i(FILE *in, FILE *out) {
+    if (in == NULL || out == NULL) return STATUS_ERR_READ;
+    int c;
+    long count = 0;
+    int has_content = 0;
+
+    while ((c = fgetc(in)) != EOF) {
+        has_content = 1;
+        if (c == '\n') {
+            if (fprintf(out, "%ld\n", count) < 0) return STATUS_ERR_WRITE;
+            count = 0;
+        } else if (isalpha((unsigned char)c) && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))) {
+            ++count;
+        }
+    }
+    if (ferror(in)) return STATUS_ERR_READ;
+
+    if (has_content) {
+        if (fprintf(out, "%ld\n", count) < 0) return STATUS_ERR_WRITE;
+    }
+    return STATUS_OK;
+}
+
+static enum Status handle_s(FILE *in, FILE *out) {
+    if (in == NULL || out == NULL) return STATUS_ERR_READ;
+    int c;
+    long count = 0;
+    int has_content = 0;
+
+    while ((c = fgetc(in)) != EOF) {
+        has_content = 1;
+        if (c == '\n') {
+            if (fprintf(out, "%ld\n", count) < 0) return STATUS_ERR_WRITE;
+            count = 0;
+        } else {
+            int is_latin = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+            int is_digit = (c >= '0' && c <= '9');
+            int is_space = (c == ' ');
+            if (!is_latin && !is_digit && !is_space) ++count;
+        }
+    }
+    if (ferror(in)) return STATUS_ERR_READ;
+
+    if (has_content) {
+        if (fprintf(out, "%ld\n", count) < 0) return STATUS_ERR_WRITE;
+    }
+    return STATUS_OK;
+}
+
+static enum Status handle_a(FILE *in, FILE *out) {
+    if (in == NULL || out == NULL) return STATUS_ERR_READ;
+    int c;
+    while ((c = fgetc(in)) != EOF) {
+        if (c >= '0' && c <= '9') {
+            if (fputc(c, out) == EOF) return STATUS_ERR_WRITE;
+        } else {
+            if (fprintf(out, "%X", (unsigned)c) < 0) return STATUS_ERR_WRITE;
+        }
+    }
+    if (ferror(in)) return STATUS_ERR_READ;
+    return STATUS_OK;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 3) {
+        fprintf(stderr, "Использование: %s <-флаг> <входной файл> [выходной файл]\n",
+                argv[0]);
+        fprintf(stderr, "Флаги: -d, -i, -s, -a\n");
+        fprintf(stderr, "       -nd, -ni, -ns, -na\n");
+        return STATUS_ERR_ARGC;
+    }
+
+    char action = 0;
+    int has_n = 0;
+    enum Status st = parse_flag(argv[1], &action, &has_n);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "неверный флаг '%s'.\n", argv[1]);
+        return st;
+    }
+
+    if (has_n) {
+        if (argc != 4) {
+            fprintf(stderr, "флаг с 'n' требует путь к выходному файлу.\n");
+            return STATUS_ERR_ARGC;
+        }
+    } else {
+        if (argc != 3) {
+            fprintf(stderr, "лишние аргументы.\n");
+            return STATUS_ERR_ARGC;
+        }
+    }
+
+    const char *input_path = argv[2];
+    char *output_path = NULL;
+    int output_allocated = 0;
+
+    if (has_n) {
+        output_path = argv[3];
+    } else {
+        st = build_output_name(input_path, &output_path);
+        if (st != STATUS_OK) {
+            fprintf(stderr, "не удалось выделить память.\n");
+            return st;
+        }
+        output_allocated = 1;
+    }
+
+    FILE *fin = fopen(input_path, "r");
+    if (fin == NULL) {
+        fprintf(stderr, "Не удалось открыть входной файл '%s'.\n", input_path);
+        if (output_allocated) free(output_path);
+        return STATUS_ERR_OPEN_INPUT;
+    }
+    
+    FILE *fout = fopen(output_path, "w");
+    if (fout == NULL) {
+        fprintf(stderr, "Не удалось открыть выходной файл '%s'.\n", output_path);
+        fclose(fin);
+        if (output_allocated) free(output_path);
+        return STATUS_ERR_OPEN_OUTPUT;
+}
+
+    switch (action) {
+        case 'd': st = handle_d(fin, fout); break;
+        case 'i': st = handle_i(fin, fout); break;
+        case 's': st = handle_s(fin, fout); break;
+        case 'a': st = handle_a(fin, fout); break;
+        default:
+            fprintf(stderr, "неизвестное действие '%c'.\n", action);
+            st = STATUS_ERR_FLAG;
+            break;
+    }
+
+    if (st != STATUS_OK) {
+        switch (st) {
+            case STATUS_ERR_READ:
+                fprintf(stderr, "Ошибка чтения из '%s'.\n", input_path);
+                break;
+            case STATUS_ERR_WRITE:
+                fprintf(stderr, "Ошибка записи в '%s'.\n", output_path);
+                break;
+            default:
+                fprintf(stderr, "Ошибка обработки (статус %d).\n", st);
+                break;
+        }
+    }
+    if (fclose(fin) != 0 && st == STATUS_OK) {
+        fprintf(stderr, "Ошибка закрытия '%s'.\n", input_path);
+        st = STATUS_ERR_CLOSE;
+    }
+    if (fclose(fout) != 0 && st == STATUS_OK) {
+        fprintf(stderr, "Ошибка закрытия '%s'.\n", output_path);
+        st = STATUS_ERR_CLOSE;
+    }
+    if (output_allocated) free(output_path);
+
+    return st;
+}
