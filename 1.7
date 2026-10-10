@@ -1,0 +1,261 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+typedef enum {
+    STATUS_OK = 0,
+    STATUS_ERR_ARGC,
+    STATUS_ERR_FLAG,
+    STATUS_ERR_OPEN_INPUT,
+    STATUS_ERR_OPEN_OUTPUT,
+    STATUS_ERR_READ,
+    STATUS_ERR_WRITE,
+    STATUS_ERR_MEMORY
+} Status;
+
+static int is_separator(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static Status read_token(FILE *fin, char **buf, size_t *cap, size_t *len, int *has_token) {
+    int c;
+    *len = 0;
+    *has_token = 0;
+
+    while ((c = fgetc(fin)) != EOF && is_separator(c)) { }
+
+    if (c == EOF) {
+        if (ferror(fin)) return STATUS_ERR_READ;
+        return STATUS_OK;
+    }
+
+    *has_token = 1;
+    do {
+        if (*len + 1 >= *cap) {
+            size_t new_cap = (*cap == 0) ? 64 : *cap * 2;
+            char *tmp = (char *)realloc(*buf, new_cap);
+            if (tmp == NULL) return STATUS_ERR_MEMORY;
+            *buf = tmp;
+            *cap = new_cap;
+        }
+        (*buf)[(*len)++] = (char)c;
+        c = fgetc(fin);
+    } while (c != EOF && !is_separator(c));
+
+    (*buf)[*len] = '\0';
+    if (c == EOF && ferror(fin)) return STATUS_ERR_READ;
+    return STATUS_OK;
+}
+
+static Status write_token(FILE *fout, const char *tok, int *first) {
+    if (!*first) {
+        if (fputc(' ', fout) == EOF) return STATUS_ERR_WRITE;
+    }
+    *first = 0;
+    if (fputs(tok, fout) == EOF) return STATUS_ERR_WRITE;
+    return STATUS_OK;
+}
+
+static Status handle_r(const char *path1, const char *path2, const char *path_out) {
+    FILE *f1 = NULL, *f2 = NULL, *fout = NULL;
+    char *b1 = NULL, *b2 = NULL;
+    size_t c1 = 0, c2 = 0, l1 = 0, l2 = 0;
+    int has1 = 0, has2 = 0;
+    int first = 1;
+    Status st = STATUS_OK;
+
+    do {
+        f1 = fopen(path1, "r");
+        if (!f1) {
+            fprintf(stderr, "Не открыть '%s'.\n", path1);
+            st = STATUS_ERR_OPEN_INPUT;
+            break;
+        }
+
+        f2 = fopen(path2, "r");
+        if (!f2) {
+            fprintf(stderr, "Не открыть '%s'.\n", path2);
+            st = STATUS_ERR_OPEN_INPUT;
+            break;
+        }
+
+        fout = fopen(path_out, "w");
+        if (!fout) {
+            fprintf(stderr, "Не открыть '%s'.\n", path_out);
+            st = STATUS_ERR_OPEN_OUTPUT;
+            break;
+        }
+
+        st = read_token(f1, &b1, &c1, &l1, &has1);
+        if (st != STATUS_OK) break;
+
+        st = read_token(f2, &b2, &c2, &l2, &has2);
+        if (st != STATUS_OK) break;
+
+        while (has1 || has2) {
+            if (has1) {
+                st = write_token(fout, b1, &first);
+                if (st != STATUS_OK) break;
+                st = read_token(f1, &b1, &c1, &l1, &has1);
+                if (st != STATUS_OK) break;
+            }
+            if (has2) {
+                st = write_token(fout, b2, &first);
+                if (st != STATUS_OK) break;
+                st = read_token(f2, &b2, &c2, &l2, &has2);
+                if (st != STATUS_OK) break;
+            }
+        }
+    } while (0);
+
+    free(b1);
+    free(b2);
+    if (f1)   fclose(f1);
+    if (f2)   fclose(f2);
+    if (fout) fclose(fout);
+
+    return st;
+}
+
+static void to_lower_latin(char *s) {
+    for (; *s; ++s) {
+        if (*s >= 'A' && *s <= 'Z') *s = (char)(*s - 'A' + 'a');
+    }
+}
+
+static char *to_base(const char *s, int base) {
+    size_t cap = strlen(s) * 4 + 1;
+    char *out = (char *)malloc(cap);
+    if (out == NULL) return NULL;
+
+    size_t pos = 0;
+    for (const char *p = s; *p; ++p) {
+        unsigned char c = (unsigned char)*p;
+        char tmp[16];
+        int n = 0;
+        if (c == 0) {
+            tmp[n++] = '0';
+        } else {
+            while (c > 0) {
+                tmp[n++] = (char)('0' + (c % base));
+                c /= base;
+            }
+        }
+        for (int i = n - 1; i >= 0; --i) out[pos++] = tmp[i];
+    }
+    out[pos] = '\0';
+    return out;
+}
+
+static char *my_strdup(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *r = (char *)malloc(n);
+    if (r) memcpy(r, s, n);
+    return r;
+}
+
+static char *process_token_a(const char *tok, size_t pos) {
+    if (pos % 10 == 0) {
+        char *lower = my_strdup(tok);
+        if (lower == NULL) return NULL;
+        to_lower_latin(lower);
+        char *res = to_base(lower, 4);
+        free(lower);
+        return res;
+    }
+    if (pos % 2 == 0) {
+        char *res = my_strdup(tok);
+        if (res == NULL) return NULL;
+        to_lower_latin(res);
+        return res;
+    }
+    if (pos % 5 == 0) {
+        return to_base(tok, 8);
+    }
+    return my_strdup(tok);
+}
+
+static Status handle_a(const char *path_in, const char *path_out) {
+    FILE *fin = NULL, *fout = NULL;
+    char *buf = NULL;
+    size_t cap = 0, len = 0;
+    int has = 0;
+    size_t pos = 0;
+    int first = 1;
+    Status st = STATUS_OK;
+
+    do {
+        fin = fopen(path_in, "r");
+        if (!fin) {
+            fprintf(stderr, "Не открыть '%s'.\n", path_in);
+            st = STATUS_ERR_OPEN_INPUT;
+            break;
+        }
+
+        fout = fopen(path_out, "w");
+        if (!fout) {
+            fprintf(stderr, "Не открыть '%s'.\n", path_out);
+            st = STATUS_ERR_OPEN_OUTPUT;
+            break;
+        }
+
+        while (1) {
+            st = read_token(fin, &buf, &cap, &len, &has);
+            if (st != STATUS_OK) break;
+            if (!has) break;
+
+            ++pos;
+            char *processed = process_token_a(buf, pos);
+            if (processed == NULL) { st = STATUS_ERR_MEMORY; break; }
+
+            st = write_token(fout, processed, &first);
+            free(processed);
+            if (st != STATUS_OK) break;
+        }
+    } while (0);
+
+    free(buf);
+    if (fin)  fclose(fin);
+    if (fout) fclose(fout);
+
+    return st;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Использование: %s <-флаг> ...\n", argv[0]);
+        return STATUS_ERR_ARGC;
+    }
+
+    if ((argv[1][0] != '-' && argv[1][0] != '/') || strlen(argv[1]) != 2) {
+        fprintf(stderr, "Неверный флаг '%s'.\n", argv[1]);
+        return STATUS_ERR_FLAG;
+    }
+
+    char flag = argv[1][1];
+    Status st = STATUS_OK;
+
+    switch (flag) {
+        case 'r':
+            if (argc != 5) {
+                fprintf(stderr, "Использование: %s -r file1 file2 output\n", argv[0]);
+                return STATUS_ERR_ARGC;
+            }
+            st = handle_r(argv[2], argv[3], argv[4]);
+            break;
+        case 'a':
+            if (argc != 4) {
+                fprintf(stderr, "Использование: %s -a input output\n", argv[0]);
+                return STATUS_ERR_ARGC;
+            }
+            st = handle_a(argv[2], argv[3]);
+            break;
+        default:
+            fprintf(stderr, "Неизвестный флаг '%c'.\n", flag);
+            return STATUS_ERR_FLAG;
+    }
+
+    if (st != STATUS_OK) fprintf(stderr, "Ошибка (статус %d).\n", st);
+    return st;
+}
