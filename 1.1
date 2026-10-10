@@ -1,0 +1,378 @@
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <limits.h>
+
+enum Status {
+    STATUS_OK = 0,
+    STATUS_ERR_ARGC,            
+    STATUS_ERR_FLAG,            
+    STATUS_ERR_NUMBER_FORMAT,   
+    STATUS_ERR_NUMBER_RANGE,    
+    STATUS_ERR_X_TOO_BIG,       
+    STATUS_ERR_MEMORY,          
+    STATUS_ERR_OVERFLOW,       
+    STATUS_ERR_DIVISION_BY_ZERO,
+    STATUS_ERR_NO_MULTIPLES
+};
+
+#define MAX_X_FOR_POWERS 10
+#define MAX_NATURAL 100
+#define MAX_X_FOR_SUM 3037000499LL
+
+static enum Status validate_flag(const char *flag) {
+    if (flag == NULL) return STATUS_ERR_FLAG;
+    if (strlen(flag) != 2) return STATUS_ERR_FLAG;
+    if (flag[0] != '-' && flag[0] != '/') return STATUS_ERR_FLAG;
+    if (strchr("hpseaf", flag[1]) == NULL) return STATUS_ERR_FLAG;
+    return STATUS_OK;
+}
+
+static enum Status parse_number(const char *str, long *out) {
+    if (str == NULL || out == NULL) return STATUS_ERR_NUMBER_FORMAT;
+    if (*str == '\0') return STATUS_ERR_NUMBER_FORMAT;
+
+    long val = 0;
+    for (const char *p = str; *p; ++p) {
+        if (!isdigit((unsigned char)*p)) return STATUS_ERR_NUMBER_FORMAT;
+
+        int digit = *p - '0';
+        if (val > (LONG_MAX - digit) / 10) return STATUS_ERR_NUMBER_RANGE;
+        val = val * 10 + digit;
+    }
+    *out = val;
+    return STATUS_OK;
+}
+
+static enum Status multiples_of_x(long x, long **out, size_t *out_count) { //-h(вывести в консоль натуральные числа в пределах 100 включительно, кратные x.)
+    if (out == NULL || out_count == NULL) return STATUS_ERR_MEMORY;
+    if (x == 0) return STATUS_ERR_DIVISION_BY_ZERO;
+
+    size_t cap = 16;
+    long *arr = (long *)malloc(cap * sizeof(long));
+    if (arr == NULL) return STATUS_ERR_MEMORY;
+
+    size_t count = 0;
+    for (long n = 1; n <= MAX_NATURAL; ++n) {
+        if (n % x == 0) {
+            if (count == cap) {
+                size_t new_cap = cap * 2;
+                long *tmp = (long *)realloc(arr, new_cap * sizeof(long));
+                if (tmp == NULL) {
+                    free(arr);
+                    return STATUS_ERR_MEMORY;
+                }
+                arr = tmp;
+                cap = new_cap;
+            }
+            arr[count++] = n;
+        }
+    }
+    if (count == 0) {
+        free(arr);
+        *out = NULL;
+        *out_count = 0;
+        return STATUS_ERR_NO_MULTIPLES;
+    }
+    *out = arr;
+    *out_count = count;
+    return STATUS_OK;
+}
+
+static enum Status is_prime(long x, int *result) { //-p(определить, является ли число x простым)
+    if (result == NULL) return STATUS_ERR_NUMBER_RANGE;
+    if (x < 2) return STATUS_ERR_NUMBER_RANGE;
+
+    if (x == 2) { *result = 1; return STATUS_OK; }
+    if (x % 2 == 0) { *result = 0; return STATUS_OK; }
+
+    for (long d = 3; d * d <= x; d += 2) {
+        if (x % d == 0) { *result = 0; return STATUS_OK; }
+    }
+    *result = 1;
+    return STATUS_OK;
+}
+
+static enum Status hex_digits(long x, int **out, size_t *out_count) { //-s(разделить число x на отдельные цифры системы счисления с основанием 16 )
+    if (out == NULL || out_count == NULL) return STATUS_ERR_MEMORY;
+    if (x == 0) {
+        int *arr = (int *)malloc(sizeof(int));
+        if (arr == NULL) return STATUS_ERR_MEMORY;
+        arr[0] = 0;
+        *out = arr;
+        *out_count = 1;
+        return STATUS_OK;
+    }
+    unsigned long ux = (unsigned long)x;
+    int *arr = (int *)malloc(sizeof(int) * 32);
+    if (arr == NULL) return STATUS_ERR_MEMORY;
+
+    size_t count = 0;
+    while (ux > 0) {
+        arr[count++] = (int)(ux & 0xF);
+        ux >>= 4;
+    }
+    for (size_t i = 0; i * 2 < count; ++i) {
+        int tmp = arr[i];
+        arr[i] = arr[count - 1 - i];
+        arr[count - 1 - i] = tmp;
+    }
+    *out = arr;
+    *out_count = count;
+    return STATUS_OK;
+}
+
+static enum Status powers_table(long x, double ***out, size_t *rows, size_t *cols) { //-e(вывести таблицу степеней )
+    if (out == NULL || rows == NULL || cols == NULL) return STATUS_ERR_MEMORY;
+    if (x > MAX_X_FOR_POWERS) return STATUS_ERR_X_TOO_BIG;
+    if (x < 1) return STATUS_ERR_NUMBER_RANGE;
+
+    size_t r = 10;
+    size_t c = (size_t)x;
+
+    double **table = (double **)malloc(r * sizeof(double *));
+    if (table == NULL) return STATUS_ERR_MEMORY;
+
+    for (size_t i = 0; i < r; ++i) {
+        table[i] = (double *)malloc(c * sizeof(double));
+        if (table[i] == NULL) {
+            for (size_t k = 0; k < i; ++k) free(table[k]);
+            free(table);
+            return STATUS_ERR_MEMORY;
+        }
+        double base = (double)(i + 1);
+        double val = 1.0;
+        for (size_t j = 0; j < c; ++j) {
+            val *= base;
+            table[i][j] = val;
+        }
+    }
+    *out = table;
+    *rows = r;
+    *cols = c;
+    return STATUS_OK;
+}
+
+static enum Status sum_natural(long x, long long *result) { //-a(вычислить сумму всех натуральных чисел от 1 до x)
+    if (result == NULL) return STATUS_ERR_NUMBER_RANGE;
+    if (x < 1) return STATUS_ERR_NUMBER_RANGE;
+    if (x > MAX_X_FOR_SUM) return STATUS_ERR_OVERFLOW;
+    long long s = (long long)x * (x + 1) / 2;
+    *result = s;
+    return STATUS_OK;
+}
+
+static enum Status factorial(long x, unsigned long long *result) { //-f(вычислить факториал x)
+    if (result == NULL) return STATUS_ERR_NUMBER_RANGE;
+    if (x < 0) return STATUS_ERR_NUMBER_RANGE;
+
+    unsigned long long f = 1;
+    for (long i = 2; i <= x; ++i) {
+        if (f > ULLONG_MAX / (unsigned long long)i) {
+            return STATUS_ERR_OVERFLOW;
+        }
+        f *= (unsigned long long)i;
+    }
+    *result = f;
+    return STATUS_OK;
+}
+
+static void print_multiples(const long *arr, size_t count) {
+    printf("Натуральные числа кратные x: ");
+    for (size_t i = 0; i < count; ++i) {
+        printf("%ld", arr[i]);
+        if (i + 1 < count) printf(" ");
+    }
+    printf("\n");
+}
+
+static void print_prime_status(int is_p) {
+    if (is_p) {
+        printf("Число x является простым.\n");
+    } else {
+        printf("Число x является составным.\n");
+    }
+}
+
+static void print_hex_digits(const int *digits, size_t count) {
+    printf("Цифры числа x в 16-ричной системе (от старших к младшим): ");
+    for (size_t i = 0; i < count; ++i) {
+        printf("%X", digits[i]);
+        if (i + 1 < count) printf(" ");
+    }
+    printf("\n");
+}
+
+static void print_powers_table(double **table, size_t rows, size_t cols) {
+    printf("Таблица степеней:\n");
+    printf("     ");
+    for (size_t j = 0; j < cols; ++j) {
+        printf("%10zu", j + 1);
+    }
+    printf("\n");
+
+    for (size_t i = 0; i < rows; ++i) {
+        printf("%3zu: ", i + 1);
+        for (size_t j = 0; j < cols; ++j) {
+            printf("%10.0f", table[i][j]);
+        }
+        printf("\n");
+    }
+}
+
+static void print_sum(long long s) {
+    printf("Сумма натуральных чисел от 1 до x: %lld\n", s);
+}
+
+static void print_factorial(unsigned long long f) {
+    printf("Факториал x: %llu\n", f);
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        fprintf(stderr, "Использование: %s <число x> <-флаг>\n", argv[0]);
+        fprintf(stderr, "Флаги: -h, -p, -s, -e, -a, -f (или с '/')\n");
+        return STATUS_ERR_ARGC;
+    }
+    enum Status status = STATUS_OK;
+
+    status = validate_flag(argv[2]);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Ошибка: неверный флаг '%s'.\n", argv[2]);
+        return status;
+    }
+    long x = 0;
+    status = parse_number(argv[1], &x);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Ошибка: неверное число '%s'.\n", argv[1]);
+        return status;
+    }
+    char flag = argv[2][1];
+
+    switch (flag) {
+        case 'h': {
+            long *arr = NULL;
+            size_t count = 0;
+            status = multiples_of_x(x, &arr, &count);
+            switch (status) {
+                case STATUS_OK:
+                    print_multiples(arr, count);
+                    free(arr);
+                    break;
+                case STATUS_ERR_NO_MULTIPLES:
+                    printf("Натуральных чисел в пределах 100, кратных %ld, нет.\n", x);
+                    break;
+                case STATUS_ERR_DIVISION_BY_ZERO:
+                    fprintf(stderr, "x не может быть равен 0 для флага -h.\n");
+                    break;
+                case STATUS_ERR_MEMORY:
+                    fprintf(stderr, "не удалось выделить память.\n");
+                    break;
+                default:
+                fprintf(stderr, "неизвестная ошибка\n");
+                break;
+            }
+            break;
+        }
+        case 'p': {
+            int is_p = 0;
+            status = is_prime(x, &is_p);
+            switch (status) {
+                case STATUS_OK:
+                    print_prime_status(is_p);
+                    break;
+                case STATUS_ERR_NUMBER_RANGE:
+                    fprintf(stderr, "x должен быть >= 2 для флага -p.\n");
+                    break;
+                default:
+                fprintf(stderr, "Неизвестная ошибка\n");
+                break;
+            }
+            break;
+        }
+        case 's': {
+            int *digits = NULL;
+            size_t count = 0;
+            status = hex_digits(x, &digits, &count);
+            switch (status) {
+                case STATUS_OK:
+                    print_hex_digits(digits, count);
+                    free(digits);
+                    break;
+                case STATUS_ERR_MEMORY:
+                    fprintf(stderr, "не удалось выделить память.\n");
+                    break;
+                default:
+                fprintf(stderr, "Неизвестная ошибка\n");
+                break;
+            }
+            break;
+        }
+        case 'e': {
+            double **table = NULL;
+            size_t rows = 0, cols = 0;
+            status = powers_table(x, &table, &rows, &cols);
+            switch (status) {
+                case STATUS_OK:
+                    print_powers_table(table, rows, cols);
+                    for (size_t i = 0; i < rows; ++i) free(table[i]);
+                    free(table);
+                    break;
+                case STATUS_ERR_X_TOO_BIG:
+                    fprintf(stderr, "для флага -e x должен быть не больше %d.\n",MAX_X_FOR_POWERS);
+                    break;
+                case STATUS_ERR_NUMBER_RANGE:
+                    fprintf(stderr, "x должен быть >= 1 для флага -e.\n");
+                    break;
+                case STATUS_ERR_MEMORY:
+                    fprintf(stderr, "не удалось выделить память.\n");
+                    break;
+                default:
+                fprintf(stderr, "Неизвестная ошибка\n");
+                break;
+            }
+            break;
+        }
+        case 'a': {
+            long long s = 0;
+            status = sum_natural(x, &s);
+            switch (status) {
+                case STATUS_OK:
+                    print_sum(s);
+                    break;
+                case STATUS_ERR_NUMBER_RANGE:
+                    fprintf(stderr, "x должен быть >= 1 для флага -a.\n");
+                    break;
+                case STATUS_ERR_OVERFLOW:
+                    fprintf(stderr, "переполнение при вычислении суммы.\n");
+                    break;
+                default:
+                fprintf(stderr, "Неизвестная ошибка\n");
+                break;
+            }
+            break;
+        }
+        case 'f': {
+            unsigned long long f = 0;
+            status = factorial(x, &f);
+            switch (status) {
+                case STATUS_OK:
+                    print_factorial(f);
+                    break;
+                case STATUS_ERR_OVERFLOW:
+                    fprintf(stderr, "переполнение при вычислении факториала.\n");
+                    break;
+                case STATUS_ERR_NUMBER_RANGE:
+                    fprintf(stderr, "x должен быть >= 0 для флага -f.\n");
+                    break;
+                default:
+                fprintf(stderr, "Неизвестная ошибка\n");
+                break;
+            }
+            break;
+        }
+    }
+    return STATUS_OK;
+}
