@@ -1,0 +1,345 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <limits.h>
+
+enum Status {
+    STATUS_OK = 0,
+    STATUS_ERR_MEMORY,
+    STATUS_ERR_BASE_RANGE,
+    STATUS_ERR_INVALID_DIGIT,
+    STATUS_ERR_EMPTY_STRING,
+    STATUS_ERR_NUMBER_OVERFLOW,
+    STATUS_ERR_NO_NUMBERS,
+    STATUS_ERR_STOP
+};
+
+#define MAX_BASE 36
+#define MIN_BASE 2
+
+static int char_to_digit(char c, int base) {
+    int val = -1;
+    if (c >= '0' && c <= '9') {
+        val = c - '0';
+    } else if (c >= 'A' && c <= 'Z') {
+        val = c - 'A' + 10;
+    } else {
+        return -1;
+    }
+    if (val >= base) return -1;
+    return val;
+}
+
+static enum Status parse_number_in_base(const char *str, int base, long long *out) {
+    if (str == NULL || out == NULL) return STATUS_ERR_EMPTY_STRING;
+    if (*str == '\0') return STATUS_ERR_EMPTY_STRING;
+
+    int neg = 0;
+    const char *p = str;
+    if (*p == '-') {
+        neg = 1;
+        ++p;
+        if (*p == '\0') return STATUS_ERR_EMPTY_STRING;
+    }
+
+    long long result = 0;
+    int digits_found = 0;
+
+    while (*p) {
+        int digit = char_to_digit(*p, base);
+        if (digit < 0) return STATUS_ERR_INVALID_DIGIT;
+
+        if (result > (LLONG_MAX - digit) / base) {
+            return STATUS_ERR_NUMBER_OVERFLOW;
+        }
+        result = result * base + digit;
+        digits_found = 1;
+        ++p;
+    }
+
+    if (!digits_found) return STATUS_ERR_EMPTY_STRING;
+
+    if (neg) {
+        if (result == LLONG_MIN) {
+            return STATUS_ERR_NUMBER_OVERFLOW;
+        }
+        result = -result;
+    }
+
+    *out = result;
+    return STATUS_OK;
+}
+
+static enum Status number_to_base_string(long long num, int base, char *buf, size_t buf_size) {
+    if (buf == NULL || buf_size == 0) return STATUS_ERR_MEMORY;
+    if (base < MIN_BASE || base > MAX_BASE) return STATUS_ERR_BASE_RANGE;
+
+    char temp[70];
+    size_t idx = 0;
+    int neg = 0;
+    unsigned long long unum;
+
+    if (num < 0) {
+        neg = 1;
+        unum = (unsigned long long)(-(num + 1)) + 1;
+    } else {
+        unum = (unsigned long long)num;
+    }
+
+    if (unum == 0) {
+        temp[idx++] = '0';
+    } else {
+        while (unum > 0) {
+            int digit = (int)(unum % (unsigned long long)base);
+            if (digit < 10) {
+                temp[idx++] = (char)('0' + digit);
+            } else {
+                temp[idx++] = (char)('A' + digit - 10);
+            }
+            unum /= (unsigned long long)base;
+        }
+    }
+
+    if (neg) {
+        temp[idx++] = '-';
+    }
+
+    if (idx + 1 > buf_size) return STATUS_ERR_MEMORY;
+
+    for (size_t i = 0; i < idx; ++i) {
+        buf[i] = temp[idx - 1 - i];
+    }
+    buf[idx] = '\0';
+    return STATUS_OK;
+}
+
+typedef struct {
+    long long *data;
+    size_t size;
+    size_t capacity;
+} NumberArray;
+
+static enum Status array_init(NumberArray *arr) {
+    if (arr == NULL) return STATUS_ERR_MEMORY;
+    arr->data = NULL;
+    arr->size = 0;
+    arr->capacity = 0;
+    return STATUS_OK;
+}
+
+static enum Status array_push(NumberArray *arr, long long value) {
+    if (arr == NULL) return STATUS_ERR_MEMORY;
+    if (arr->size == arr->capacity) {
+        size_t new_cap = (arr->capacity == 0) ? 16 : arr->capacity * 2;
+        long long *tmp = (long long *)realloc(arr->data, new_cap * sizeof(long long));
+        if (tmp == NULL) return STATUS_ERR_MEMORY;
+        arr->data = tmp;
+        arr->capacity = new_cap;
+    }
+    arr->data[arr->size++] = value;
+    return STATUS_OK;
+}
+
+static void array_free(NumberArray *arr) {
+    if (arr != NULL) {
+        free(arr->data);
+        arr->data = NULL;
+        arr->size = 0;
+        arr->capacity = 0;
+    }
+}
+
+static enum Status find_max_abs(const NumberArray *arr, long long *out_max) {
+    if (arr == NULL || out_max == NULL) return STATUS_ERR_MEMORY;
+    if (arr->size == 0) return STATUS_ERR_NO_NUMBERS;
+
+    long long max_abs = arr->data[0];
+    unsigned long long max_abs_val;
+    if (max_abs < 0) {
+        max_abs_val = (unsigned long long)(-(max_abs + 1)) + 1;
+    } else {
+        max_abs_val = (unsigned long long)max_abs;
+    }
+
+    for (size_t i = 1; i < arr->size; ++i) {
+        long long val = arr->data[i];
+        unsigned long long abs_val;
+        if (val < 0) {
+            abs_val = (unsigned long long)(-(val + 1)) + 1;
+        } else {
+            abs_val = (unsigned long long)val;
+        }
+        if (abs_val > max_abs_val) {
+            max_abs_val = abs_val;
+            max_abs = val;
+        }
+    }
+    *out_max = max_abs;
+    return STATUS_OK;
+}
+
+static enum Status sum_all(const NumberArray *arr, long long *out_sum) {
+    if (arr == NULL || out_sum == NULL) return STATUS_ERR_MEMORY;
+    if (arr->size == 0) return STATUS_ERR_NO_NUMBERS;
+
+    long long sum = 0;
+    for (size_t i = 0; i < arr->size; ++i) {
+        long long val = arr->data[i];
+        if (val > 0 && sum > LLONG_MAX - val) return STATUS_ERR_NUMBER_OVERFLOW;
+        if (val < 0 && sum < LLONG_MIN - val) return STATUS_ERR_NUMBER_OVERFLOW;
+        sum += val;
+    }
+    *out_sum = sum;
+    return STATUS_OK;
+}
+
+static enum Status read_line(char *buf, size_t size) {
+    if (buf == NULL || size == 0) return STATUS_ERR_MEMORY;
+    if (fgets(buf, (int)size, stdin) == NULL) {
+        return STATUS_ERR_EMPTY_STRING;
+    }
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n') {
+        buf[len - 1] = '\0';
+    }
+    return STATUS_OK;
+}
+
+static enum Status print_number_in_bases(long long num) {
+    char buf[70];
+    enum Status st;
+
+    printf("Число (десятичное): %lld\n", num);
+
+    const int bases[] = {9, 18, 27, 36};
+    for (size_t i = 0; i < sizeof(bases) / sizeof(bases[0]); ++i) {
+        st = number_to_base_string(num, bases[i], buf, sizeof(buf));
+        if (st != STATUS_OK) return st;
+        printf("  в системе %2d: %s\n", bases[i], buf);
+    }
+    return STATUS_OK;
+}
+
+
+int main(void) {
+    enum Status status;
+    char input[256];
+
+    printf("Введите основание системы счисления (2..36): ");
+    status = read_line(input, sizeof(input));
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Ошибка чтения основания.\n");
+        return status;
+    }
+
+    char *endptr;
+    long base_long = strtol(input, &endptr, 10);
+    if (*endptr != '\0' || base_long < MIN_BASE || base_long > MAX_BASE) {
+        fprintf(stderr, "Ошибка: основание должно быть целым числом от %d до %d.\n",
+                MIN_BASE, MAX_BASE);
+        return STATUS_ERR_BASE_RANGE;
+    }
+    int base = (int)base_long;
+
+    NumberArray numbers;
+    status = array_init(&numbers);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Ошибка инициализации массива.\n");
+        return status;
+    }
+
+    printf("Вводите числа в системе счисления %d (для завершения введите Stop):\n", base);
+
+    while (1) {
+        printf("> ");
+        status = read_line(input, sizeof(input));
+        if (status != STATUS_OK) {
+            fprintf(stderr, "Ошибка чтения строки.\n");
+            array_free(&numbers);
+            return status;
+        }
+
+        if (strcmp(input, "Stop") == 0) {
+            break;
+        }
+
+        if (input[0] == '\0') {
+            continue;
+        }
+
+        long long value;
+        status = parse_number_in_base(input, base, &value);
+        if (status != STATUS_OK) {
+            switch (status) {
+                case STATUS_ERR_INVALID_DIGIT:
+                    fprintf(stderr, "Ошибка: недопустимая цифра для основания %d.\n", base);
+                    break;
+                case STATUS_ERR_EMPTY_STRING:
+                    fprintf(stderr, "Ошибка: пустая строка.\n");
+                    break;
+                case STATUS_ERR_NUMBER_OVERFLOW:
+                    fprintf(stderr, "Ошибка: переполнение при преобразовании числа.\n");
+                    break;
+                default:
+                    fprintf(stderr, "Неизвестная ошибка.\n");
+                    break;
+            }
+            continue;
+        }
+
+        status = array_push(&numbers, value);
+        if (status != STATUS_OK) {
+            fprintf(stderr, "Ошибка выделения памяти.\n");
+            array_free(&numbers);
+            return status;
+        }
+    }
+
+    if (numbers.size == 0) {
+        fprintf(stderr, "Не введено ни одного числа.\n");
+        array_free(&numbers);
+        return STATUS_ERR_NO_NUMBERS;
+    }
+
+    long long max_abs;
+    status = find_max_abs(&numbers, &max_abs);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Ошибка поиска максимума.\n");
+        array_free(&numbers);
+        return status;
+    }
+
+    long long sum;
+    status = sum_all(&numbers, &sum);
+    if (status != STATUS_OK) {
+        if (status == STATUS_ERR_NUMBER_OVERFLOW) {
+            fprintf(stderr, "Ошибка: переполнение при вычислении суммы.\n");
+        } else {
+            fprintf(stderr, "Ошибка вычисления суммы.\n");
+        }
+        array_free(&numbers);
+        return status;
+    }
+
+    printf("\n--- Результаты ---\n");
+
+    printf("Максимальное по модулю число:\n");
+    status = print_number_in_bases(max_abs);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Ошибка вывода числа.\n");
+        array_free(&numbers);
+        return status;
+    }
+
+    printf("\nСумма всех чисел:\n");
+    status = print_number_in_bases(sum);
+    if (status != STATUS_OK) {
+        fprintf(stderr, "Ошибка вывода суммы.\n");
+        array_free(&numbers);
+        return status;
+    }
+
+    array_free(&numbers);
+    return STATUS_OK;
+}
