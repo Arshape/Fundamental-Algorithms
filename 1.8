@@ -1,0 +1,157 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <limits.h>
+
+enum Status {
+    STATUS_OK = 0,
+    STATUS_ERR_ARGC,
+    STATUS_ERR_OPEN_INPUT,
+    STATUS_ERR_OPEN_OUTPUT,
+    STATUS_ERR_READ,
+    STATUS_ERR_WRITE,
+    STATUS_ERR_NUMBER_FORMAT,
+    STATUS_ERR_OVERFLOW
+};
+
+static int char_to_digit(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    return -1;
+}
+
+static int is_separator(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static enum Status process_token(const char *tok, FILE *out) {
+    size_t len = strlen(tok);
+    if (len == 0) return STATUS_OK;
+
+    int d_max = 0;
+    for (size_t i = 0; i < len; ++i) {
+        int d = char_to_digit((unsigned char)tok[i]);
+        if (d < 0) return STATUS_ERR_NUMBER_FORMAT;
+        if (d > d_max) d_max = d;
+    }
+
+    int base = d_max + 1;
+    if (base < 2) base = 2;
+
+    size_t start = 0;
+    while (start < len && tok[start] == '0') ++start;
+    const char *digits = tok + start;
+    size_t digits_len = len - start;
+    int is_zero = (digits_len == 0);
+
+    unsigned long long value = 0;
+    int overflow = 0;
+
+    if (is_zero) {
+        value = 0;
+    } else {
+        for (size_t i = 0; i < digits_len; ++i) {
+            int d = char_to_digit((unsigned char)digits[i]);
+            if (value > (ULLONG_MAX - (unsigned long long)d) / (unsigned long long)base) {
+                overflow = 1;
+                break;
+            }
+            value = value * (unsigned long long)base + (unsigned long long)d;
+        }
+    }
+
+    if (is_zero) {
+        if (fprintf(out, "0 %d 0\n", base) < 0) return STATUS_ERR_WRITE;
+    } else if (overflow) {
+        if (fprintf(out, "%.*s %d -\n", (int)digits_len, digits, base) < 0)
+            return STATUS_ERR_WRITE;
+    } else {
+        if (fprintf(out, "%.*s %d %llu\n",
+                    (int)digits_len, digits, base, value) < 0)
+            return STATUS_ERR_WRITE;
+    }
+    return STATUS_OK;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 4) {
+        fprintf(stderr, "Использование: %s <флаг> <входной файл> <выходной файл>\n",
+                argv[0]);
+        return STATUS_ERR_ARGC;
+    }
+    if (argv[1][0] != '-' && argv[1][0] != '/') {
+        fprintf(stderr, "Ошибка: флаг должен начинаться с '-' или '/'.\n");
+        return STATUS_ERR_ARGC;
+    }
+
+    FILE *fin = fopen(argv[2], "r");
+    if (fin == NULL) {
+        fprintf(stderr, "Не удалось открыть '%s'.\n", argv[2]);
+        return STATUS_ERR_OPEN_INPUT;
+    }
+
+    FILE *fout = fopen(argv[3], "w");
+    if (fout == NULL) {
+        fprintf(stderr, "Не удалось открыть '%s'.\n", argv[3]);
+        fclose(fin);
+        return STATUS_ERR_OPEN_OUTPUT;
+    }
+    size_t cap = 64;
+    char *tok = (char *)malloc(cap);
+    if (tok == NULL) {
+        fclose(fin); fclose(fout);
+        return STATUS_ERR_READ;
+    }
+    size_t len = 0;
+
+    enum Status st = STATUS_OK;
+    int c;
+
+    while ((c = fgetc(fin)) != EOF) {
+        if (is_separator(c)) {
+            if (len > 0) {
+                tok[len] = '\0';
+                st = process_token(tok, fout);
+                if (st != STATUS_OK) break;
+                len = 0;
+            }
+        } else {
+            if (len + 1 >= cap) {
+                size_t new_cap = cap * 2;
+                char *tmp = (char *)realloc(tok, new_cap);
+                if (tmp == NULL) { st = STATUS_ERR_READ; break; }
+                tok = tmp;
+                cap = new_cap;
+            }
+            tok[len++] = (char)c;
+        }
+    }
+    if (st == STATUS_OK && len > 0) {
+        tok[len] = '\0';
+        st = process_token(tok, fout);
+    }
+
+    if (ferror(fin) && st == STATUS_OK) st = STATUS_ERR_READ;
+
+    free(tok);
+    fclose(fin);
+    fclose(fout);
+
+    if (st != STATUS_OK) {
+        switch (st) {
+            case STATUS_ERR_READ:
+                fprintf(stderr, "Ошибка чтения.\n"); break;
+            case STATUS_ERR_WRITE:
+                fprintf(stderr, "Ошибка записи.\n"); break;
+            case STATUS_ERR_NUMBER_FORMAT:
+                fprintf(stderr, "Некорректный символ в числе.\n"); break;
+            default:
+                fprintf(stderr, "Ошибка %d.\n", st); break;
+        }
+        return st;
+    }
+
+    return STATUS_OK;
+}
