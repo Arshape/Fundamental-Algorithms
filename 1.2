@@ -1,0 +1,331 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <math.h>
+#include <float.h>
+
+enum Status {
+    STATUS_OK = 0,
+    STATUS_ERR_ARGC,
+    STATUS_ERR_EPSILON_FORMAT,
+    STATUS_ERR_EPSILON_RANGE,
+    STATUS_ERR_OVERFLOW,
+    STATUS_ERR_NO_CONVERGENCE
+};
+
+#define MAX_ITER 10000000          
+
+static enum Status parse_epsilon(const char *str, double *out) {
+    if (str == NULL || out == NULL) return STATUS_ERR_EPSILON_FORMAT;
+    if (*str == '\0') return STATUS_ERR_EPSILON_FORMAT;
+
+    char *end = NULL;
+    double val = strtod(str, &end);
+    if (end == str || *end != '\0') return STATUS_ERR_EPSILON_FORMAT;
+    if (val <= 0.0 || val >= 1.0) return STATUS_ERR_EPSILON_RANGE;
+    *out = val;
+    return STATUS_OK;
+}
+
+static enum Status e_series(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double sum = 1.0;      
+    double term = 1.0;
+    for (int n = 1; n < MAX_ITER; ++n) {
+        term /= (double)n;
+        if (term < eps) { *out = sum; return STATUS_OK; }
+        sum += term;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status e_limit(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double prev = 0.0;
+    for (int n = 1; n < MAX_ITER; ++n) {
+        double val = pow(1.0 + 1.0 / n, (double)n);
+        if (fabs(val - prev) < eps) { *out = val; return STATUS_OK; }
+        prev = val;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status e_equation(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double x = 2.0;
+    for (int i = 0; i < MAX_ITER; ++i) {
+        double fx = log(x) - 1.0;
+        double next = x - fx * x;
+        if (fabs(next - x) < eps) { *out = next; return STATUS_OK; }
+        x = next;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status pi_series(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double sum = 0.0;
+    double sign = 1.0;
+    for (int n = 1; n < MAX_ITER; ++n) {
+        double term = sign / (2.0 * n - 1.0);
+        if (fabs(term) < eps) break;
+        sum += term;
+        sign = -sign;
+    }
+    *out = 4.0 * sum;
+    return STATUS_OK;
+}
+
+static enum Status pi_limit(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double prev = 0.0;
+    double ln_fact_n = 0.0;
+    double ln_fact_2n = 0.0;
+
+    for (int n = 1; n < MAX_ITER; ++n) {
+        ln_fact_n  += log((double)n);
+        ln_fact_2n += log((double)(2*n - 1)) + log((double)(2*n));
+
+        double ln_val = 4.0 * n * log(2.0)
+                      + 4.0 * ln_fact_n
+                      - log((double)n)
+                      - 2.0 * ln_fact_2n;
+        double val = exp(ln_val);
+
+        if (fabs(val - prev) < eps) { *out = val; return STATUS_OK; }
+        prev = val;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status pi_equation(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double x = 3.0;
+    for (int i = 0; i < MAX_ITER; ++i) {
+        double fx = cos(x) + 1.0;
+        double dfx = -sin(x);
+        if (fabs(dfx) < 1e-15) return STATUS_ERR_OVERFLOW;
+        double next = x - fx / dfx;
+        if (fabs(next - x) < eps) { *out = next; return STATUS_OK; }
+        x = next;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status ln2_series(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double sum = 0.0;
+    double sign = 1.0;
+    for (int n = 1; n < MAX_ITER; ++n) {
+        double term = sign / n;
+        if (fabs(term) < eps) break;
+        sum += term;
+        sign = -sign;
+    }
+    *out = sum;
+    return STATUS_OK;
+}
+
+static enum Status ln2_limit(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double prev = 0.0;
+    for (int n = 1; n < MAX_ITER; ++n) {
+        double val = n * (pow(2.0, 1.0 / n) - 1.0);
+        if (fabs(val - prev) < eps) { *out = val; return STATUS_OK; }
+        prev = val;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status ln2_equation(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double x = 0.5;
+    for (int i = 0; i < MAX_ITER; ++i) {
+        double ex = exp(x);
+        double next = x - (ex - 2.0) / ex;
+        if (fabs(next - x) < eps) { *out = next; return STATUS_OK; }
+        x = next;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status sqrt2_series(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double sum = 0.0;
+    double term = 0.25;  
+    for (int k = 2; k < MAX_ITER; ++k) {
+        if (term < eps) break;
+        sum += term;
+        term /= 2.0;
+    }
+    *out = pow(2.0, sum);
+    return STATUS_OK;
+}
+
+static enum Status sqrt2_limit(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double x = -0.5;
+    for (int i = 0; i < MAX_ITER; ++i) {
+        double next = x - x * x / 2.0 + 1.0;
+        if (fabs(next - x) < eps) { *out = next; return STATUS_OK; }
+        x = next;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status sqrt2_equation(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    double x = 1.0;
+    for (int i = 0; i < MAX_ITER; ++i) {
+        double next = (x + 2.0 / x) / 2.0;
+        if (fabs(next - x) < eps) { *out = next; return STATUS_OK; }
+        x = next;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status gamma_series(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+
+    double sum = 0.0;
+    double prev = 1e100;
+
+    for (int k = 1; k < MAX_ITER; ++k) {
+        double dk = (double)k;
+        double term = 1.0 / dk - log1p(1.0 / dk);  
+        sum += term;
+        double tail = 1.0 / (2.0 * dk);
+        if (tail < eps) {
+            *out = sum;
+            return STATUS_OK;
+        }
+        if (fabs(sum - prev) < eps * 0.5) {
+            *out = sum;
+            return STATUS_OK;
+        }
+        prev = sum;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static enum Status gamma_limit(double eps, double *out) {
+    double H = 0.0;
+    double prev = 1e100;
+    for (int n = 1; n < MAX_ITER; ++n) {
+        H += 1.0 / n;
+        double val = H - log((double)n);
+        if (fabs(val - prev) < eps) { *out = val; return STATUS_OK; }
+        prev = val;
+    }
+    return STATUS_ERR_NO_CONVERGENCE;
+}
+
+static int is_prime(long n) {
+    if (n < 2) return 0;
+    if (n == 2) return 1;
+    if (n % 2 == 0) return 0;
+    for (long d = 3; d * d <= n; d += 2)
+        if (n % d == 0) return 0;
+    return 1;
+}
+
+static enum Status gamma_equation(double eps, double *out) {
+    if (out == NULL) return STATUS_ERR_EPSILON_RANGE;
+    long t_max = 1000000;
+    double prod = 1.0;
+    for (long p = 2; p <= t_max; ++p) {
+        if (is_prime(p)) prod *= (1.0 - 1.0 / p);
+    }
+    double val = -log(prod * log((double)t_max));
+    *out = val;
+    (void)eps;
+    return STATUS_OK;
+}
+
+static void print_result(const char *name, const char *method, double value, double eps) {
+    printf("%-6s | %-20s | %.15f | eps = %.1e\n", name, method, value, eps);
+}
+
+static void print_header(void) {
+    printf("%-6s | %-20s | %-17s | %s\n", "Const", "Method", "Value", "Epsilon");
+    printf("-------|----------------------|-------------------|----------\n");
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Использование: %s <epsilon>\n", argv[0]);
+        fprintf(stderr, "Пример: %s 1e-6\n", argv[0]);
+        return STATUS_ERR_ARGC;
+    }
+
+    double eps = 0.0;
+    enum Status status = parse_epsilon(argv[1], &eps);
+    switch (status) {
+        case STATUS_OK:
+            break;
+        case STATUS_ERR_EPSILON_FORMAT:
+            fprintf(stderr, "Ошибка: '%s' не является числом.\n", argv[1]);
+            return status;
+        case STATUS_ERR_EPSILON_RANGE:
+            fprintf(stderr, "Ошибка: eps должно быть в диапазоне (0, 1).\n");
+            return status;
+        default:
+            fprintf(stderr, "Неизвестная ошибка.\n");
+            return status;
+    }
+
+    print_header();
+
+    double val = 0.0;
+
+    if ((status = e_series(eps, &val)) == STATUS_OK)
+        print_result("e", "series", val, eps);
+    else fprintf(stderr, "e series: ошибка %d\n", status);
+
+    if ((status = e_limit(eps, &val)) == STATUS_OK)
+        print_result("e", "limit", val, eps);
+    else fprintf(stderr, "e limit: ошибка %d\n", status);
+
+    if ((status = e_equation(eps, &val)) == STATUS_OK)
+        print_result("e", "equation", val, eps);
+    else fprintf(stderr, "e equation: ошибка %d\n", status);
+
+    if ((status = pi_series(eps, &val)) == STATUS_OK)
+        print_result("pi", "series", val, eps);
+
+    if ((status = pi_limit(eps, &val)) == STATUS_OK)
+        print_result("pi", "limit", val, eps);
+
+    if ((status = pi_equation(eps, &val)) == STATUS_OK)
+        print_result("pi", "equation", val, eps);
+
+    if ((status = ln2_series(eps, &val)) == STATUS_OK)
+        print_result("ln2", "series", val, eps);
+
+    if ((status = ln2_limit(eps, &val)) == STATUS_OK)
+        print_result("ln2", "limit", val, eps);
+
+    if ((status = ln2_equation(eps, &val)) == STATUS_OK)
+        print_result("ln2", "equation", val, eps);
+
+    if ((status = sqrt2_series(eps, &val)) == STATUS_OK)
+        print_result("sqrt2", "series", val, eps);
+
+    if ((status = sqrt2_limit(eps, &val)) == STATUS_OK)
+        print_result("sqrt2", "limit", val, eps);
+
+    if ((status = sqrt2_equation(eps, &val)) == STATUS_OK)
+        print_result("sqrt2", "equation", val, eps);
+
+    if ((status = gamma_series(eps, &val)) == STATUS_OK)
+        print_result("gamma", "series", val, eps);
+
+    if ((status = gamma_limit(eps, &val)) == STATUS_OK)
+        print_result("gamma", "limit", val, eps);
+
+    if ((status = gamma_equation(eps, &val)) == STATUS_OK)
+        print_result("gamma", "equation", val, eps);
+
+    return STATUS_OK;
+}
