@@ -1,0 +1,327 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <math.h>
+#include <limits.h>
+
+enum Status {
+    STATUS_OK = 0,
+    STATUS_ERR_ARGC,
+    STATUS_ERR_FLAG,
+    STATUS_ERR_NUMBER_FORMAT,
+    STATUS_ERR_NUMBER_RANGE,
+    STATUS_ERR_EPSILON_RANGE,
+    STATUS_ERR_ZERO_COEFF,       
+    STATUS_ERR_ZERO_NUMBER,      
+    STATUS_ERR_NO_REAL_ROOTS,
+    STATUS_ERR_NOT_TRIANGLE,
+    STATUS_ERR_MEMORY
+};
+
+#define EPS_MIN 1e-15
+#define EPS_MAX 1.0
+
+static enum Status validate_flag(const char *flag) {
+    if (flag == NULL) return STATUS_ERR_FLAG;
+    if (strlen(flag) != 2) return STATUS_ERR_FLAG;
+    if (flag[0] != '-' && flag[0] != '/') return STATUS_ERR_FLAG;
+    if (strchr("qmt", flag[1]) == NULL) return STATUS_ERR_FLAG;
+    return STATUS_OK;
+}
+
+static enum Status parse_double(const char *str, double *out) {
+    if (str == NULL || out == NULL) return STATUS_ERR_NUMBER_FORMAT;
+    if (*str == '\0') return STATUS_ERR_NUMBER_FORMAT;
+
+    char *end = NULL;
+    double val = strtod(str, &end);
+    if (end == str || *end != '\0') return STATUS_ERR_NUMBER_FORMAT;
+    if (!isfinite(val)) return STATUS_ERR_NUMBER_FORMAT;
+    *out = val;
+    return STATUS_OK;
+}
+
+static enum Status parse_long(const char *str, long *out) {
+    if (str == NULL || out == NULL) return STATUS_ERR_NUMBER_FORMAT;
+    if (*str == '\0') return STATUS_ERR_NUMBER_FORMAT;
+
+    const char *p = str;
+    int negative = 0;
+    if (*p == '+' || *p == '-') {
+        negative = (*p == '-');
+        ++p;
+    }
+    if (*p == '\0') return STATUS_ERR_NUMBER_FORMAT;
+    for (const char *q = p; *q; ++q) {
+        if (!isdigit((unsigned char)*q)) return STATUS_ERR_NUMBER_FORMAT;
+    }
+
+    long val = 0;
+    for (; *p; ++p) {
+        int d = *p - '0';
+        if (!negative && val > (LONG_MAX - d) / 10) return STATUS_ERR_NUMBER_RANGE;
+        if ( negative && val > (LONG_MAX - d + 1) / 10) {
+            return STATUS_ERR_NUMBER_RANGE;
+        }
+        val = val * 10 + d;
+    }
+    *out = negative ? -val : val;
+    return STATUS_OK;
+}
+
+static enum Status parse_epsilon(const char *str, double *out) {
+    enum Status st = parse_double(str, out);
+    if (st != STATUS_OK) return st;
+    if (*out < EPS_MIN || *out >= EPS_MAX) return STATUS_ERR_EPSILON_RANGE;
+    return STATUS_OK;
+}
+
+static int nearly_equal(double a, double b, double eps) {
+    return fabs(a - b) < eps;
+}
+
+static enum Status solve_quadratic(double a, double b, double c, double eps, double *x1, double *x2) {
+    if (x1 == NULL || x2 == NULL) return STATUS_ERR_ZERO_COEFF;
+    if (fabs(a) < eps) return STATUS_ERR_ZERO_COEFF;
+
+    double D = b * b - 4.0 * a * c;
+
+    if (!isfinite(D)) return STATUS_ERR_NUMBER_RANGE;
+
+    if (D < -eps) return STATUS_ERR_NO_REAL_ROOTS;
+
+    if (D < 0.0) D = 0.0;
+    double sq = sqrt(D);
+    *x1 = (-b - sq) / (2.0 * a);
+    *x2 = (-b + sq) / (2.0 * a);
+    return STATUS_OK;
+}
+static void print_quadratic_result(double a, double b, double c, enum Status st, double x1, double x2, double eps) {
+    printf("  a=%.6g, b=%.6g, c=%.6g -> ", a, b, c);
+    switch (st) {
+        case STATUS_OK:
+            if (nearly_equal(x1, x2, eps)) {
+                printf("x1 = x2 = %.10g\n", x1);
+            } else {
+                printf("x1 = %.10g, x2 = %.10g\n", x1, x2);
+            }
+            break;
+        case STATUS_ERR_NO_REAL_ROOTS:
+            printf("нет действительных корней\n");
+            break;
+        case STATUS_ERR_ZERO_COEFF:
+            printf("уравнение не квадратное\n");
+            break;
+        case STATUS_ERR_NUMBER_RANGE:
+            printf("переполнение при вычислении дискриминанта\n");
+            break;
+        default:
+            printf("неизвестная ошибка %d\n", st);
+            break;
+    }
+}
+
+static int permutation_seen(const double perms[][3], int count, double a, double b, double c, double eps) {
+    for (int i = 0; i < count; ++i) {
+        if (nearly_equal(perms[i][0], a, eps) &&
+            nearly_equal(perms[i][1], b, eps) &&
+            nearly_equal(perms[i][2], c, eps)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static enum Status handle_q(int argc, char *argv[]) {
+    if (argc != 6) {
+        fprintf(stderr, "Флаг -q требует 4 параметра: <eps> <a> <b> <c>\n");
+        return STATUS_ERR_ARGC;
+    }
+
+    double eps = 0.0;
+    enum Status st = parse_epsilon(argv[2], &eps);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "Неверное значение eps '%s'.\n", argv[2]);
+        return st;
+    }
+
+    double coef[3];
+    for (int i = 0; i < 3; ++i) {
+        st = parse_double(argv[3 + i], &coef[i]);
+        if (st != STATUS_OK) {
+            fprintf(stderr, "Неверный коэффициент '%s'.\n", argv[3 + i]);
+            return st;
+        }
+    }
+
+    static const int idx[6][3] = {
+        {0,1,2}, {0,2,1}, {1,0,2}, {1,2,0}, {2,0,1}, {2,1,0}
+    };
+
+    double seen[6][3];
+    int seen_count = 0;
+
+    printf("Решения квадратного уравнения при уникальных перестановках:\n");
+
+    for (int k = 0; k < 6; ++k) {
+        double a = coef[idx[k][0]];
+        double b = coef[idx[k][1]];
+        double c = coef[idx[k][2]];
+
+        if (permutation_seen(seen, seen_count, a, b, c, eps)) {
+            continue;
+        }
+
+        seen[seen_count][0] = a;
+        seen[seen_count][1] = b;
+        seen[seen_count][2] = c;
+        ++seen_count;
+
+        double x1 = 0.0, x2 = 0.0;
+        enum Status rs = solve_quadratic(a, b, c, eps, &x1, &x2);
+        print_quadratic_result(a, b, c, rs, x1, x2, eps);
+    }
+
+    return STATUS_OK;
+}
+
+static int is_multiple(long a, long b) {
+    if (a == LONG_MIN && b == -1) return 1;
+    return (a % b) == 0;
+}
+
+static void print_multiple_result(long a, long b, int result) {
+    if (result) {
+        printf("%ld кратно %ld\n", a, b);
+    } else {
+        printf("%ld не кратно %ld\n", a, b);
+    }
+}
+
+static enum Status handle_m(int argc, char *argv[]) {
+    if (argc != 4) {
+        fprintf(stderr, "Ошибка: флаг -m требует 2 параметра: <a> <b>\n");
+        return STATUS_ERR_ARGC;
+    }
+
+    long a = 0, b = 0;
+    enum Status st = parse_long(argv[2], &a);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "Неверное число '%s'.\n", argv[2]);
+        return st;
+    }
+    st = parse_long(argv[3], &b);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "Неверное число: '%s'.\n", argv[3]);
+        return st;
+    }
+
+    if (a == 0 || b == 0) {
+        fprintf(stderr, "Оба числа должны быть ненулевыми.\n");
+        return STATUS_ERR_ZERO_NUMBER;
+    }
+
+    int res = is_multiple(a, b);
+    print_multiple_result(a, b, res);
+    return STATUS_OK;
+}
+
+static enum Status is_right_triangle(double a, double b, double c, double eps) {
+    if (a <= 0.0 || b <= 0.0 || c <= 0.0) return STATUS_ERR_NOT_TRIANGLE;
+
+    if (a + b <= c + eps) return STATUS_ERR_NOT_TRIANGLE;
+    if (a + c <= b + eps) return STATUS_ERR_NOT_TRIANGLE;
+    if (b + c <= a + eps) return STATUS_ERR_NOT_TRIANGLE;
+
+    double s[3] = {a, b, c};
+
+    if (nearly_equal(s[0]*s[0] + s[1]*s[1], s[2]*s[2], eps)) return STATUS_OK;
+    if (nearly_equal(s[0]*s[0] + s[2]*s[2], s[1]*s[1], eps)) return STATUS_OK;
+    if (nearly_equal(s[1]*s[1] + s[2]*s[2], s[0]*s[0], eps)) return STATUS_OK;
+
+    return STATUS_ERR_NOT_TRIANGLE;
+}
+
+static void print_triangle_result(double a, double b, double c, enum Status st) {
+    printf("  Стороны %.6g, %.6g, %.6g ", a, b, c);
+    switch (st) {
+        case STATUS_OK:
+            printf("могут быть сторонами прямоугольного треугольника\n");
+            break;
+        case STATUS_ERR_NOT_TRIANGLE:
+            printf("не могут быть сторонами прямоугольного треугольника\n");
+            break;
+        default:
+            printf("неизвестная ошибка %d\n", st);
+            break;
+    }
+}
+
+static enum Status handle_t(int argc, char *argv[]) {
+    if (argc != 6) {
+        fprintf(stderr, "флаг -t требует 4 параметра: <eps> <a> <b> <c>\n");
+        return STATUS_ERR_ARGC;
+    }
+
+    double eps = 0.0;
+    enum Status st = parse_epsilon(argv[2], &eps);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "неверное значение eps '%s'.\n", argv[2]);
+        return st;
+    }
+
+    double s[3];
+    for (int i = 0; i < 3; ++i) {
+        st = parse_double(argv[3 + i], &s[i]);
+        if (st != STATUS_OK) {
+            fprintf(stderr, "неверная сторона '%s'.\n", argv[3 + i]);
+            return st;
+        }
+        if (s[i] <= 0.0) {
+            fprintf(stderr, "сторона должна быть > 0.\n");
+            return STATUS_ERR_NOT_TRIANGLE;
+        }
+    }
+
+    printf("проверка на прямоугольный треугольник:\n");
+    enum Status rs = is_right_triangle(s[0], s[1], s[2], eps);
+    print_triangle_result(s[0], s[1], s[2], rs);
+    return STATUS_OK;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Использование: %s <-флаг> [параметры]\n", argv[0]);
+        fprintf(stderr, "Флаги: -q <eps> <a> <b> <c>\n");
+        fprintf(stderr, "       -m <a> <b>\n");
+        fprintf(stderr, "       -t <eps> <a> <b> <c>\n");
+        return STATUS_ERR_ARGC;
+    }
+
+    enum Status st = validate_flag(argv[1]);
+    if (st != STATUS_OK) {
+        fprintf(stderr, "Ошибка: неверный флаг '%s'.\n", argv[1]);
+        return st;
+    }
+
+    char flag = argv[1][1];
+    enum Status result = STATUS_OK;
+
+    switch (flag) {
+        case 'q':
+            result = handle_q(argc, argv);
+            break;
+        case 'm':
+            result = handle_m(argc, argv);
+            break;
+        case 't':
+            result = handle_t(argc, argv);
+            break;
+        default:
+            fprintf(stderr, "Ошибка: неизвестный флаг '%c'.\n", flag);
+            result = STATUS_ERR_FLAG;
+            break;
+    }
+    return result;
+}
