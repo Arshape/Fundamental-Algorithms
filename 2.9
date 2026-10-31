@@ -1,0 +1,164 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ALLOC,
+    ST_ERR_ARG,
+    ST_ERR_BASE,
+    ST_ERR_RANGE
+} Status;
+
+static size_t str_len(const char *s){
+    size_t n = 0;
+    if (s == NULL) return 0;
+    while (s[n] != '\0') ++n;
+    return n;
+}
+
+static unsigned long long nod(unsigned long long a, unsigned long long b){
+    while (b != 0) {
+        unsigned long long t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+
+static Status double_to_fraction(double x, unsigned long long *out_p,
+                                 unsigned long long *out_q){
+    char buf[64];
+    int n;
+    size_t i, len;
+    unsigned long long p = 0, q = 1;
+    int seen_dot = 0;
+
+    if (x <= 0.0 || x >= 1.0) return ST_ERR_RANGE;
+
+    n = snprintf(buf, sizeof(buf), "%.12f", x);
+    if (n < 0 || (size_t)n >= sizeof(buf)) return ST_ERR_RANGE;
+
+    len = str_len(buf);
+    for (i = 0; i < len; ++i) {
+        char c = buf[i];
+        if (c == '.') { seen_dot = 1; continue; }
+        if (c < '0' || c > '9') continue;   
+        if (!seen_dot) {
+            p = p * 10ULL + (unsigned long long)(c - '0');
+        } else {
+            p = p * 10ULL + (unsigned long long)(c - '0');
+            q *= 10ULL;
+        }
+    }
+
+    *out_p = p;
+    *out_q = q;
+    return ST_OK;
+}
+
+static int divides(unsigned long long q, int base){
+    unsigned long long b = (unsigned long long)base;
+    while (q > 1) {
+        unsigned long long g = nod(q, b);
+        if (g == 1) return 0;  
+        q /= g;
+    }
+    return 1;
+}
+
+Status if_finite(int base, int count, int **out_results, ...){ 
+    va_list ap;
+    int *res = NULL;
+    int i;
+    Status st = ST_OK;
+
+    if (out_results == NULL) return ST_ERR_ARG;
+    *out_results = NULL;
+    if (base < 2 || base > 36) return ST_ERR_BASE;
+    if (count < 0) return ST_ERR_ARG;
+
+    if (count == 0) {
+        *out_results = NULL;
+        return ST_OK;
+    }
+
+    res = (int *)malloc((size_t)count * sizeof(int));
+    if (res == NULL) return ST_ERR_ALLOC;
+
+    va_start(ap, out_results);
+    for (i = 0; i < count && st == ST_OK; ++i) {
+        double x = va_arg(ap, double);
+        unsigned long long p = 0, q = 1, g;
+
+        st = double_to_fraction(x, &p, &q);
+        if (st != ST_OK) break;
+
+        if (p == 0) {
+            res[i] = 1;
+            continue;
+        }
+        g = nod(p, q);
+        p /= g;
+        q /= g;
+
+        res[i] = divides(q, base);
+    }
+    va_end(ap);
+
+    if (st != ST_OK) { free(res); return st; }
+    *out_results = res;
+    return ST_OK;
+}
+
+static void print_status(Status st)
+{
+    switch (st) {
+    case ST_OK: break;
+    case ST_ERR_ALLOC: fprintf(stderr, "Ошибка памяти\n"); break;
+    case ST_ERR_ARG:   fprintf(stderr, "Неверный аргумент\n"); break;
+    case ST_ERR_BASE:  fprintf(stderr, "Неверное основание\n"); break;
+    case ST_ERR_RANGE: fprintf(stderr, "Значение вне диапозона\n"); break;
+    default:           fprintf(stderr, "Неизвестный статус\n"); break;
+    }
+}
+
+int main(void){
+    int *res = NULL;
+    Status st;
+
+    printf("Основание 10:\n");
+    {
+        double v[] = {0.5, 0.1, 0.25, 0.2};
+        st = if_finite(10, 4, &res, v[0], v[1], v[2], v[3]);
+        if (st == ST_OK) {
+            for (int i = 0; i < 4; ++i)
+                printf("  %.10f -> %s\n", v[i], res[i] ? "finite" : "infinite");
+            free(res); res = NULL;
+        } else print_status(st);
+    }
+  
+    printf("Основание 2:\n");
+    {
+        double v[] = {0.5, 0.25, 0.125, 0.1};
+        st = if_finite(2, 4, &res, v[0], v[1], v[2], v[3]);
+        if (st == ST_OK) {
+            for (int i = 0; i < 4; ++i)
+                printf("  %.10f -> %s\n", v[i], res[i] ? "finite" : "infinite");
+            free(res); res = NULL;
+        } else print_status(st);
+    }
+
+    printf("Основание 3:\n");
+    {
+        double v[] = {0.5, 0.25, 0.1, 0.2};
+        st = if_finite(3, 4, &res, v[0], v[1], v[2], v[3]);
+        if (st == ST_OK) {
+            for (int i = 0; i < 4; ++i)
+                printf("  %.10f - %s\n", v[i], res[i] ? "finite" : "infinite");
+            free(res); res = NULL;
+        } else print_status(st);
+    }
+    return 0;
+}
