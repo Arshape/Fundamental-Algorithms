@@ -1,0 +1,229 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ALLOC,
+    ST_ERR_FILE,
+    ST_ERR_ARG,
+    ST_ERR_READ
+} Status;
+
+static size_t str_len(const char *s){
+    size_t n = 0;
+    if (s == NULL) return 0;
+    while (s[n] != '\0') ++n;
+    return n;
+}
+
+static int str_compare(const char *a, const char *b){
+    size_t i = 0;
+    while (a[i] != '\0' && b[i] != '\0') {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+        ++i;
+    }
+    if (a[i] == '\0' && b[i] == '\0') return 0;
+    return (a[i] == '\0') ? -1 : 1;
+}
+
+static Status read_file(const char *path, char **out_buf, size_t *out_len){
+    FILE *f;
+    char *buf = NULL;
+    size_t len = 0, cap = 0;
+    size_t got;
+
+    if (path == NULL || out_buf == NULL || out_len == NULL)
+        return ST_ERR_ARG;
+
+    f = fopen(path, "rb");
+    if (f == NULL) return ST_ERR_FILE;
+
+    for (;;) {
+        if (len == cap) {
+            size_t new_cap = (cap == 0) ? 4096 : cap * 2;
+            char *tmp = (char *)realloc(buf, new_cap);
+            if (tmp == NULL) { free(buf); fclose(f); return ST_ERR_ALLOC; }
+            buf = tmp;
+            cap = new_cap;
+        }
+        got = fread(buf + len, 1, cap - len, f);
+        len += got;
+        if (got == 0) {
+            if (ferror(f)) { free(buf); fclose(f); return ST_ERR_READ; }
+            break;
+        }
+    }
+    fclose(f);
+
+    if (buf == NULL) {
+        buf = (char *)malloc(1);
+        if (buf == NULL) return ST_ERR_ALLOC;
+    }
+    *out_buf = buf;
+    *out_len = len;
+    return ST_OK;
+}
+
+static void build_pi(const char *nsub, size_t nlen, size_t *pi){
+    size_t i, k = 0;
+    if (nlen == 0) return;
+    pi[0] = 0;
+    for (i = 1; i < nlen; ++i) {
+        while (k > 0 && nsub[i] != nsub[k]) {
+            k = pi[k - 1];
+        }
+        if (nsub[i] == nsub[k]) {
+            ++k;
+        }
+        pi[i] = k;
+    }
+}
+
+static Status find_all(const char *hbuf, size_t hlen,
+                           const char *nsub, size_t nlen,
+                           size_t **out_offsets, size_t *out_count){
+    size_t *pi = NULL;
+    size_t *offs = NULL;
+    size_t count = 0, cap = 0;
+    size_t i, k = 0;
+    Status st = ST_OK;
+
+    if (hbuf == NULL || nsub == NULL || out_offsets == NULL || out_count == NULL)
+        return ST_ERR_ARG;
+    if (nlen == 0) return ST_ERR_ARG;
+    if (nlen > hlen) { *out_offsets = NULL; *out_count = 0; return ST_OK; }
+
+    pi = (size_t *)malloc(nlen * sizeof(size_t));
+    if (pi == NULL) return ST_ERR_ALLOC;
+    build_pi(nsub, nlen, pi);
+
+    for (i = 0; i < hlen; ++i) {
+        while (k > 0 && hbuf[i] != nsub[k]) {
+            k = pi[k - 1];
+        }
+        if (hbuf[i] == nsub[k]) {
+            ++k;
+        }
+        if (k == nlen) {
+            size_t start = i - nlen + 1;
+            if (count == cap) {
+                size_t new_cap = (cap == 0) ? 16 : cap * 2;
+                size_t *tmp = (size_t *)realloc(offs, new_cap * sizeof(size_t));
+                if (tmp == NULL) { st = ST_ERR_ALLOC; break; }
+                offs = tmp;
+                cap = new_cap;
+            }
+            offs[count++] = start;
+            k = pi[k - 1];
+        }
+    }
+
+    free(pi);
+    if (st != ST_OK) { free(offs); return st; }
+    *out_offsets = offs;
+    *out_count = count;
+    return ST_OK;
+}
+
+static void offset_to_line_col(const char *hbuf, size_t offset, size_t *out_line, size_t *out_col){
+    size_t line = 1, col = 1, i;
+    for (i = 0; i < offset; ++i) {
+        if (hbuf[i] == '\n') { ++line; col = 1; }
+        else ++col;
+    }
+    *out_line = line;
+    *out_col = col;
+}
+
+static Status report_file(FILE *out_stream, const char *path, const char *nsub, size_t nlen){
+    char *buf = NULL;
+    size_t hlen = 0;
+    size_t *offs = NULL;
+    size_t count = 0, i;
+    Status st;
+
+    st = read_file(path, &buf, &hlen);
+    if (st != ST_OK) {
+        fprintf(out_stream, "%s: Ошибка чтения файла\n", path);
+        return st;
+    }
+
+    st = find_all(buf, hlen, nsub, nlen, &offs, &count);
+    if (st != ST_OK) {
+        free(buf);
+        fprintf(out_stream, "%s: Ошибка памяти\n", path);
+        return st;
+    }
+
+    if (count == 0) {
+        fprintf(out_stream, "%s: Нет совпадений\n", path);
+    } else {
+        for (i = 0; i < count; ++i) {
+            size_t line, col;
+            offset_to_line_col(buf, offs[i], &line, &col);
+            fprintf(out_stream, "%s: строка %zu, позиция %zu\n", path, line, col);
+        }
+    }
+    free(offs);
+    free(buf);
+    return ST_OK;
+}
+
+Status find_in_files(const char *substr, int count, ...){
+    va_list ap;
+    Status first_err = ST_OK;
+    int i, j;
+    size_t nlen;
+    const char **paths = NULL;
+
+    if (substr == NULL || count < 0) return ST_ERR_ARG;
+    nlen = str_len(substr);
+    if (nlen == 0) return ST_ERR_ARG;
+
+    if (count > 0) {
+        paths = (const char **)malloc((size_t)count * sizeof(const char *));
+        if (paths == NULL) return ST_ERR_ALLOC;
+    }
+
+    va_start(ap, count);
+    for (i = 0; i < count; ++i) {
+        paths[i] = va_arg(ap, const char *);
+    }
+    va_end(ap);
+
+    for (i = 0; i < count; ++i) {
+        if (paths[i] == NULL) {
+            fprintf(stdout, "Ошибка передачи файла\n");
+            first_err = ST_ERR_ARG;
+            free(paths);
+            return first_err;
+        }
+        for (j = i + 1; j < count; ++j) {
+            if (paths[j] != NULL && str_compare(paths[i], paths[j]) == 0) {
+                fprintf(stderr, "Ошибка: файл '%s' передан дважды\n", paths[i]);
+                free(paths);
+                return ST_ERR_ARG;
+            }
+        }
+    }
+    for (i = 0; i < count; ++i) {
+        Status st = report_file(stdout, paths[i], substr, nlen);
+        if (st != ST_OK && first_err == ST_OK) first_err = st;
+    }
+
+    free(paths);
+    return first_err;
+}
+
+int main(void){
+    Status st;
+    st = find_in_files("ab", 3, "3_1.txt", "3_2.txt", "3_3.txt");
+    if (st != ST_OK) {
+        fprintf(stderr, "Ошибка %d\n", (int)st);
+        return 1;
+    }
+    return 0;
+}
