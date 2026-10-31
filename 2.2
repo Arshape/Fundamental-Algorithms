@@ -1,0 +1,380 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+
+#define EPS 1e-9
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ARG_COUNT,
+    ST_ERR_FLAG,
+    ST_ERR_FILE_IN,
+    ST_ERR_FILE_OUT,
+    ST_ERR_ALLOC,
+    ST_ERR_PARSE_ID,
+    ST_ERR_PARSE_NAME,
+    ST_ERR_PARSE_SALARY,
+    ST_ERR_EMPTY_FILE,
+    ST_ERR_WRITE
+} Status;
+
+typedef struct {
+    unsigned int id;
+    char *name;
+    char *surname;
+    double salary;
+} Employee;
+
+static size_t str_len(const char *s){
+    size_t n = 0;
+    if (s == NULL) return 0;
+    while (s[n] != '\0') ++n;
+    return n;
+}
+
+static int str_compare(const char *a, const char *b){ 
+    size_t i = 0;
+    while (a[i] != '\0' && b[i] != '\0') {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+        ++i;
+    }
+    if (a[i] == '\0' && b[i] == '\0') return 0;
+    return (a[i] == '\0') ? -1 : 1;
+}
+
+static int is_alpha(char c){
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static int is_digit(char c) { 
+    return c >= '0' && c <= '9'; 
+}
+
+static Status parse_id(const char *s, size_t len, unsigned int *out){
+    unsigned long long acc = 0;
+    size_t i;
+    if (s == NULL || out == NULL || len == 0) return ST_ERR_PARSE_ID;
+    for (i = 0; i < len; ++i) {
+        if (!is_digit(s[i])) return ST_ERR_PARSE_ID;
+        acc = acc * 10ULL + (unsigned long long)(s[i] - '0');
+        if (acc > (unsigned long long)UINT_MAX) return ST_ERR_PARSE_ID;
+    }
+    *out = (unsigned int)acc;
+    return ST_OK;
+}
+
+static Status parse_name(const char *s, size_t len, char **out){
+    size_t i;
+    char *p;
+    if (s == NULL || out == NULL || len == 0) return ST_ERR_PARSE_NAME;
+    for (i = 0; i < len; ++i) {
+        if (!is_alpha(s[i])) return ST_ERR_PARSE_NAME;
+    }
+    p = (char *)malloc(len + 1);
+    if (p == NULL) return ST_ERR_ALLOC;
+    for (i = 0; i < len; ++i) p[i] = s[i];
+    p[len] = '\0';
+    *out = p;
+    return ST_OK;
+}
+
+static Status parse_salary(const char *s, size_t len, double *out){
+    size_t i = 0;
+    int seen_digit = 0, seen_dot = 0;
+    double int_part = 0.0, frac_part = 0.0, frac_scale = 1.0;
+
+    if (s == NULL || out == NULL || len == 0) return ST_ERR_PARSE_SALARY;
+
+    for (i = 0; i < len; ++i) {
+        char c = s[i];
+        if (c == '.') {
+            if (seen_dot) return ST_ERR_PARSE_SALARY;
+            seen_dot = 1;
+        } else if (is_digit(c)) {
+            seen_digit = 1;
+        } else {
+            return ST_ERR_PARSE_SALARY;
+        }
+    }
+    if (!seen_digit) return ST_ERR_PARSE_SALARY;
+
+    i = 0;
+    while (i < len && s[i] != '.') {
+        int_part = int_part * 10.0 + (double)(s[i] - '0');
+        ++i;
+    }
+    if (i < len && s[i] == '.') {
+        ++i;
+        while (i < len) {
+            frac_scale *= 10.0;
+            frac_part = frac_part * 10.0 + (double)(s[i] - '0');
+            ++i;
+        }
+    }
+    *out = int_part + frac_part / frac_scale;
+    if (*out < 0.0) return ST_ERR_PARSE_SALARY;
+    return ST_OK;
+}
+
+static Status parse_employee(const char *line, size_t len, Employee *out){
+    size_t i = 0;
+    size_t tok_start[4];
+    size_t tok_len[4];
+    int t = 0;
+    Employee e;
+    Status st;
+
+    if (line == NULL || out == NULL) return ST_ERR_PARSE_ID;
+
+    while (i < len && (line[i] == ' ' || line[i] == '\t')) ++i;
+
+    while (t < 4 && i < len) {
+        tok_start[t] = i;
+        while (i < len && line[i] != ' ' && line[i] != '\t'){
+            ++i;
+        } 
+        tok_len[t] = i - tok_start[t];
+        if (tok_len[t] == 0){
+            return ST_ERR_PARSE_ID;
+        } 
+        ++t;
+        while (i < len && (line[i] == ' ' || line[i] == '\t')){
+            ++i;
+        } 
+    }
+    if (t != 4) return ST_ERR_PARSE_ID;
+    if (i < len) return ST_ERR_PARSE_ID;
+
+    e.name = NULL;
+    e.surname = NULL;
+
+    st = parse_id(&line[tok_start[0]], tok_len[0], &e.id);
+    if (st != ST_OK) return st;
+
+    st = parse_name(&line[tok_start[1]], tok_len[1], &e.name);
+    if (st != ST_OK) return st;
+
+    st = parse_name(&line[tok_start[2]], tok_len[2], &e.surname);
+    if (st != ST_OK) { free(e.name); return st; }
+
+    st = parse_salary(&line[tok_start[3]], tok_len[3], &e.salary);
+    if (st != ST_OK) { free(e.name); free(e.surname); return st; }
+
+    *out = e;
+    return ST_OK;
+}
+
+static void free_employees(Employee *arr, size_t count){
+    size_t i;
+    if (arr == NULL) return;
+    for (i = 0; i < count; ++i) {
+        free(arr[i].name);
+        free(arr[i].surname);
+    }
+    free(arr);
+}
+
+static Status read_line(FILE *f, char **line, size_t *line_cap, size_t *out_len, int *out_eof){
+    size_t len = 0;
+    int ch;
+    *out_eof = 0;
+    for (;;) {
+        ch = fgetc(f);
+        if (ch == EOF) { *out_eof = 1; break; }
+        if (ch == '\n') break;
+        if (len + 1 >= *line_cap) {
+            size_t new_cap = (*line_cap == 0) ? 128 : *line_cap * 2;
+            char *tmp = (char *)realloc(*line, new_cap);
+            if (tmp == NULL) return ST_ERR_ALLOC;
+            *line = tmp;
+            *line_cap = new_cap;
+        }
+        (*line)[len++] = (char)ch;
+    }
+    if (len > 0 && (*line)[len - 1] == '\r') --len;
+    *out_len = len;
+    return ST_OK;
+}
+
+static Status read_employees(const char *path, Employee **out_arr, size_t *out_count){
+    FILE *f;
+    Employee *arr = NULL;
+    size_t count = 0, cap = 0;
+    char *line = NULL;
+    size_t line_cap = 0;
+    Status st = ST_OK;
+    int eof = 0;
+
+    if (path == NULL || out_arr == NULL || out_count == NULL)
+        return ST_ERR_ARG_COUNT;
+
+    f = fopen(path, "r");
+    if (f == NULL) return ST_ERR_FILE_IN;
+
+    while (st == ST_OK && !eof) {
+        size_t len = 0;
+        st = read_line(f, &line, &line_cap, &len, &eof);
+        if (st != ST_OK) break;
+        if (len == 0) continue;
+
+        if (count == cap) {
+            size_t new_cap = (cap == 0) ? 8 : cap * 2;
+            Employee *tmp = (Employee *)realloc(arr, new_cap * sizeof(Employee));
+            if (tmp == NULL) { st = ST_ERR_ALLOC; break; }
+            arr = tmp;
+            cap = new_cap;
+        }
+        st = parse_employee(line, len, &arr[count]);
+        if (st != ST_OK) break;
+        ++count;
+    }
+
+    if (st == ST_OK && count == 0) st = ST_ERR_EMPTY_FILE;
+
+    if (st == ST_OK) {
+        *out_arr = arr;
+        *out_count = count;
+        arr = NULL;
+    }
+
+    free(line);
+    free_employees(arr, count);
+    fclose(f);
+    return st;
+}
+
+static int employee_compare(const Employee *a, const Employee *b, double eps, int desc){
+    int r = 0;
+    if (a->salary < b->salary - eps){
+        r = -1;
+    } else if (a->salary > b->salary + eps){
+        r = 1;
+    } else {
+        int c = str_compare(a->surname, b->surname);
+        if (c != 0) r = c;
+        else {
+            c = str_compare(a->name, b->name);
+            if (c != 0) r = c;
+            else {
+                if (a->id < b->id){
+                    r = -1;
+                } else if (a->id > b->id){
+                    r = 1;
+                } else{
+                    r = 0;
+                }
+            }
+        }
+    }
+    return desc ? -r : r;
+}
+
+static int compare_a(const void *pa, const void *pb){ 
+    return employee_compare((const Employee *)pa, (const Employee *)pb, EPS, 0); 
+}
+
+static int compare_d(const void *pa, const void *pb){
+    return employee_compare((const Employee *)pa, (const Employee *)pb, EPS, 1);
+}
+
+static Status write_employees(const char *path, const Employee *arr, size_t count){
+    FILE *f;
+    size_t i;
+    Status st = ST_OK;
+
+    if (path == NULL || arr == NULL) return ST_ERR_ARG_COUNT;
+
+    f = fopen(path, "w");
+    if (f == NULL) return ST_ERR_FILE_OUT;
+
+    for (i = 0; i < count && st == ST_OK; ++i) {
+        if (fprintf(f, "%u %s %s %.2f\n",
+                    arr[i].id, arr[i].name, arr[i].surname, arr[i].salary) < 0) {
+            st = ST_ERR_WRITE;
+        }
+    }
+    if (fclose(f) != 0 && st == ST_OK) st = ST_ERR_WRITE;
+    return st;
+}
+
+static Status parse_flag(const char *arg, int *out_desc){
+    if (arg == NULL || out_desc == NULL) return ST_ERR_FLAG;
+    if (str_len(arg) != 2) return ST_ERR_FLAG;
+    if (arg[0] != '-' && arg[0] != '/') return ST_ERR_FLAG;
+    if (arg[1] == 'a') { *out_desc = 0; return ST_OK; }
+    if (arg[1] == 'd') { *out_desc = 1; return ST_OK; }
+    return ST_ERR_FLAG;
+}
+
+static void print_status(Status st){
+    switch (st) {
+    case ST_OK:
+        break;
+    case ST_ERR_ARG_COUNT:
+        fprintf(stderr, "Error: usage: prog <input> <-a|-d|/a|/d> <output>\n");
+        break;
+    case ST_ERR_FLAG:
+        fprintf(stderr, "Неверный флаг\n");
+        break;
+    case ST_ERR_FILE_IN:
+        fprintf(stderr, "Не удалось открыть входной файл\n");
+        break;
+    case ST_ERR_FILE_OUT:
+        fprintf(stderr, "Не удалось открыть выходной файл\n");
+        break;
+    case ST_ERR_ALLOC:
+        fprintf(stderr, "Ошибка памяти\n");
+        break;
+    case ST_ERR_PARSE_ID:
+        fprintf(stderr, "Неверный id\n");
+        break;
+    case ST_ERR_PARSE_NAME:
+        fprintf(stderr, "Неверное имя/фамилия\n");
+        break;
+    case ST_ERR_PARSE_SALARY:
+        fprintf(stderr, "Неверная зарплата\n");
+        break;
+    case ST_ERR_EMPTY_FILE:
+        fprintf(stderr, "Входной файл пустой\n");
+        break;
+    case ST_ERR_WRITE:
+        fprintf(stderr, "Ошибка записи\n");
+        break;
+    default:
+        fprintf(stderr, "Неизвестный статус\n");
+        break;
+    }
+}
+
+int main(int argc, char **argv){
+    Employee *arr = NULL;
+    size_t count = 0;
+    int desc = 0;
+    Status st;
+
+    if (argc != 4) {
+        print_status(ST_ERR_ARG_COUNT);
+        return 1;
+    }
+
+    st = parse_flag(argv[2], &desc);
+    if (st != ST_OK) { print_status(st); return 1; }
+
+    if (str_compare(argv[1], argv[3]) == 0) {
+        fprintf(stderr, "Входной и выходной файл совпадают\n");
+        return 1;
+    }
+
+    st = read_employees(argv[1], &arr, &count);
+    if (st != ST_OK) { print_status(st); return 1; }
+
+    qsort(arr, count, sizeof(Employee), desc ? compare_d : compare_a);
+
+    st = write_employees(argv[3], arr, count);
+    free_employees(arr, count);
+    if (st != ST_OK) { print_status(st); return 1; }
+
+    return 0;
+}
