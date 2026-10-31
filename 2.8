@@ -1,0 +1,161 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ALLOC,
+    ST_ERR_ARG,
+    ST_ERR_BASE,
+    ST_ERR_DIGIT,
+    ST_ERR_EMPTY
+} Status;
+
+static size_t str_len(const char *s){
+    size_t n = 0;
+    if (s == NULL) return 0;
+    while (s[n] != '\0') ++n;
+    return n;
+}
+
+static int digit_value(char c){
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return -1;
+}
+
+static char digit_char(int d){
+    static const char digits[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+    if (d < 0 || d > 35) return '?';
+    return digits[d];
+}
+
+static Status validate_number(const char *s, int base){
+    size_t i, n;
+    if (s == NULL) return ST_ERR_EMPTY;
+    n = str_len(s);
+    if (n == 0) return ST_ERR_EMPTY;
+    for (i = 0; i < n; ++i) {
+        int d = digit_value(s[i]);
+        if (d < 0 || d >= base) return ST_ERR_DIGIT;
+    }
+    return ST_OK;
+}
+
+static Status add_columns(const char *a, const char *b, int base, char **out){
+    size_t la, lb, maxlen, i;
+    int *tmp = NULL;
+    char *res = NULL;
+    int carry = 0;
+    size_t ri = 0;
+    Status st;
+
+    if (a == NULL || b == NULL || out == NULL) return ST_ERR_ARG;
+    if (base < 2 || base > 36) return ST_ERR_BASE;
+
+    st = validate_number(a, base);
+    if (st != ST_OK) return st;
+    st = validate_number(b, base);
+    if (st != ST_OK) return st;
+
+    la = str_len(a);
+    lb = str_len(b);
+    maxlen = (la > lb) ? la : lb;
+
+    tmp = (int *)calloc(maxlen + 1, sizeof(int));
+    if (tmp == NULL) return ST_ERR_ALLOC;
+
+    for (i = 0; i < maxlen; ++i) {
+        int da = 0, db = 0, s;
+        if (i < la) da = digit_value(a[la - 1 - i]);
+        if (i < lb) db = digit_value(b[lb - 1 - i]);
+        s = da + db + carry;
+        tmp[i] = s % base;
+        carry = s / base;
+    }
+    if (carry > 0) {
+        tmp[maxlen] = carry;
+        ++maxlen;
+    }
+
+    {
+        size_t top = maxlen;
+        while (top > 1 && tmp[top - 1] == 0) --top;
+        res = (char *)malloc(top + 1);
+        if (res == NULL) { free(tmp); return ST_ERR_ALLOC; }
+        for (i = 0; i < top; ++i) {
+            res[top - 1 - i] = digit_char(tmp[i]);
+        }
+        res[top] = '\0';
+        ri = top;
+    }
+    (void)ri;
+
+    free(tmp);
+    *out = res;
+    return ST_OK;
+}
+
+Status sum_in_base(int base, int count, char **out_sum, ...){
+    va_list ap;
+    char *acc = NULL;
+    int i;
+    Status st = ST_OK;
+
+    if (out_sum == NULL) return ST_ERR_ARG;
+    *out_sum = NULL;
+    if (base < 2 || base > 36) return ST_ERR_BASE;
+    if (count < 0) return ST_ERR_ARG;
+
+    acc = (char *)malloc(2);
+    if (acc == NULL) return ST_ERR_ALLOC;
+    acc[0] = '0'; acc[1] = '\0';
+
+    va_start(ap, out_sum);
+    for (i = 0; i < count && st == ST_OK; ++i) {
+        const char *s = va_arg(ap, const char *);
+        char *next = NULL;
+        st = add_columns(acc, s, base, &next);
+        if (st == ST_OK) {
+            free(acc);
+            acc = next;
+        }
+    }
+    va_end(ap);
+
+    if (st != ST_OK) { free(acc); return st; }
+    *out_sum = acc;
+    return ST_OK;
+}
+
+static void print_status(Status st){
+    switch (st) {
+    case ST_OK: break;
+    case ST_ERR_ALLOC:  fprintf(stderr, "Ошибка памяти\n"); break;
+    case ST_ERR_ARG:    fprintf(stderr, "Неверный аргумент\n"); break;
+    case ST_ERR_BASE:   fprintf(stderr, "Неверное основание]\n"); break;
+    case ST_ERR_DIGIT:  fprintf(stderr, "Неверное число в основании\n"); break;
+    case ST_ERR_EMPTY:  fprintf(stderr, "Пустое число\n"); break;
+    default:            fprintf(stderr, "Неизвестный статус\n"); break;
+    }
+}
+
+int main(void){
+    char *sum = NULL;
+    Status st;
+    
+    st = sum_in_base(10, 3, &sum, "123", "456", "789");
+    if (st == ST_OK) { printf("10: 123 + 456 + 789 = %s\n", sum); free(sum); sum = NULL; }
+    else print_status(st);
+
+    st = sum_in_base(2, 3, &sum, "1010", "110", "1");
+    if (st == ST_OK) { printf("2:  1010 + 110 + 1 = %s\n", sum); free(sum); sum = NULL; }
+    else print_status(st);
+
+    st = sum_in_base(16, 2, &sum, "ff", "1");
+    if (st == ST_OK) { printf("16: ff + 1 = %s\n", sum); free(sum); sum = NULL; }
+    else print_status(st);
+
+    return 0;
+}
