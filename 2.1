@@ -1,0 +1,319 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ALLOC,
+    ST_ERR_ARG_COUNT,
+    ST_ERR_ARG_FLAG,
+    ST_ERR_ARG_NUM,      
+    ST_ERR_ARG_EMPTY,    
+    ST_ERR_OUT_OF_RANGE
+} Status;
+
+static size_t str_len(const char *s){
+    size_t n = 0;
+    if (s == NULL){
+        return 0;
+    }
+    while (s[n] != '\0'){
+        ++n;
+    }
+    return n;
+}
+
+static int is_digit(char c) { 
+    return c >= '0' && c <= '9'; 
+}
+
+static int is_alpha(char c){
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static char to_upper(char c){
+    if (c >= 'a' && c <= 'z'){
+        return (char)(c - 'a' + 'A');
+    }
+    return c;
+}
+
+static Status parse_uint(const char *s, unsigned int *out){
+    unsigned long long acc = 0;
+    size_t i = 0;
+    if (s == NULL || out == NULL || s[0] == '\0') return ST_ERR_ARG_NUM;
+    for (i = 0; s[i] != '\0'; ++i) {
+        if (!is_digit(s[i])) return ST_ERR_ARG_NUM;
+        acc = acc * 10ULL + (unsigned long long)(s[i] - '0');
+        if (acc > (unsigned long long)UINT_MAX) return ST_ERR_OUT_OF_RANGE;
+    }
+    *out = (unsigned int)acc;
+    return ST_OK;
+}
+
+static Status do_l(const char *s, size_t *out_len){
+    if (s == NULL || out_len == NULL) return ST_ERR_ARG_EMPTY;
+    *out_len = str_len(s);
+    return ST_OK;
+}
+
+static Status do_r(const char *s, char **out){
+    size_t n, i;
+    char *p;
+    if (s == NULL || out == NULL) return ST_ERR_ARG_EMPTY;
+    n = str_len(s);
+    p = (char *)malloc(n + 1);
+    if (p == NULL) return ST_ERR_ALLOC;
+    for (i = 0; i < n; ++i){
+        p[i] = s[n - 1 - i];
+    }
+    p[n] = '\0';
+    *out = p;
+    return ST_OK;
+}
+
+static Status do_u(const char *s, char **out){
+    size_t n, i;
+    char *p;
+    if (s == NULL || out == NULL) return ST_ERR_ARG_EMPTY;
+    n = str_len(s);
+    p = (char *)malloc(n + 1);
+    if (p == NULL){
+        return ST_ERR_ALLOC;
+    }
+    for (i = 0; i < n; ++i) {
+        p[i] = (i % 2 == 1) ? to_upper(s[i]) : s[i];
+    }
+    p[n] = '\0';
+    *out = p;
+    return ST_OK;
+}
+
+static Status do_n(const char *s, char **out){
+    size_t n, i;
+    size_t nd = 0, nl = 0, no = 0;   /* длины трёх групп */
+    char *digits = NULL, *letters = NULL, *others = NULL;
+    char *p = NULL;
+    size_t k = 0;
+
+    if (s == NULL || out == NULL) return ST_ERR_ARG_EMPTY;
+
+    n = str_len(s);
+
+    digits  = (char *)malloc(n + 1);
+    letters = (char *)malloc(n + 1);
+    others  = (char *)malloc(n + 1);
+    if (digits == NULL || letters == NULL || others == NULL) {
+        free(digits);
+        free(letters);
+        free(others);
+        return ST_ERR_ALLOC;
+    }
+    for (i = 0; i < n; ++i) {
+        char c = s[i];
+        if (is_digit(c)) {
+            digits[nd++] = c;
+        } else if (is_alpha(c)) {
+            letters[nl++] = c;
+        } else {
+            others[no++] = c;
+        }
+    }
+    p = (char *)malloc(n + 1);
+    if (p == NULL) {
+        free(digits);
+        free(letters);
+        free(others);
+        return ST_ERR_ALLOC;
+    }
+
+    for (i = 0; i < nd; ++i) p[k++] = digits[i];
+    for (i = 0; i < nl; ++i) p[k++] = letters[i];
+    for (i = 0; i < no; ++i) p[k++] = others[i];
+    p[k] = '\0';
+
+    free(digits);
+    free(letters);
+    free(others);
+
+    *out = p;
+    return ST_OK;
+}
+
+static Status do_c(char *const *strings, size_t count, unsigned int seed,char **out){
+    size_t total = 0, i;
+    size_t *idx = NULL;
+    char *p = NULL;
+    size_t pos = 0;
+    unsigned int r;
+    (void)seed; 
+
+    if (strings == NULL || out == NULL) return ST_ERR_ARG_EMPTY;
+    if (count == 0) return ST_ERR_ARG_EMPTY;
+
+    for (i = 0; i < count; ++i) {
+        if (strings[i] == NULL) return ST_ERR_ARG_EMPTY;
+        total += str_len(strings[i]);
+    }
+
+    idx = (size_t *)malloc(count * sizeof(size_t));
+    if (idx == NULL) return ST_ERR_ALLOC;
+    for (i = 0; i < count; ++i) idx[i] = i;
+
+    for (i = count; i > 1; --i) {
+        size_t j, tmp;
+        r = (unsigned int)rand();
+        j = (size_t)(r % (unsigned int)i);
+        tmp = idx[i - 1];
+        idx[i - 1] = idx[j];
+        idx[j] = tmp;
+    }
+
+    p = (char *)malloc(total + 1);
+    if (p == NULL) { 
+        free(idx); 
+        return ST_ERR_ALLOC; 
+    }
+
+    for (i = 0; i < count; ++i) {
+        const char *str = strings[idx[i]];
+        size_t k = 0;
+        while (str[k] != '\0') { 
+            p[pos++] = str[k]; 
+            ++k; 
+        }
+    }
+    p[pos] = '\0';
+
+    free(idx);
+    *out = p;
+    return ST_OK;
+}
+
+static void print_line(const char *s){
+    if (s != NULL) {
+        fputs(s, stdout);
+    }
+    fputc('\n', stdout);
+}
+
+int main(int argc, char **argv){
+    Status st = ST_OK;
+    const char *flag;
+    const char *arg_str;
+
+    if (argc < 3) {
+        fprintf(stderr, "Неверное число переданных аргументов\n");
+        return 1;
+    }
+
+    flag = argv[1];
+    arg_str = argv[2];
+
+    if (flag[0] != '-' || flag[1] == '\0' || flag[2] != '\0') {
+        fprintf(stderr, "Неверный формат флаг '%s'\n", flag);
+        return 1;
+    }
+
+    switch (flag[1]) {
+    case 'l': {
+        size_t len = 0;
+        if (argc != 3) {
+            fprintf(stderr, "Для флага -l требуется 2 аргумента\n");
+            return 1;
+        }
+        st = do_l(arg_str, &len);
+        if (st == ST_OK) printf("%zu\n", len);
+        break;
+    }
+    case 'r': {
+        char *res = NULL;
+        if (argc != 3) {
+            fprintf(stderr, "Для флага -r требуется 2 аргумента\n");
+            return 1;
+        }
+        st = do_r(arg_str, &res);
+        if (st == ST_OK) { print_line(res); free(res); }
+        break;
+    }
+    case 'u': {
+        char *res = NULL;
+        if (argc != 3) {
+            fprintf(stderr, "Для флага -u требуется 2 аргумента\n");
+            return 1;
+        }
+        st = do_u(arg_str, &res);
+        if (st == ST_OK) { print_line(res); free(res); }
+        break;
+    }
+    case 'n': {
+        char *res = NULL;
+        if (argc != 3) {
+            fprintf(stderr, "Для флага -n требуется 2 аргумента\n");
+            return 1;
+        }
+        st = do_n(arg_str, &res);
+        if (st == ST_OK) { print_line(res); free(res); }
+        break;
+    }
+    case 'c': {
+    unsigned int seed = 0;
+    char *res = NULL;
+    char **cand = NULL;
+    size_t cand_count;
+    size_t k, j;
+
+    if (argc < 5) {
+        fprintf(stderr, "Неверное число аргументов для флага -c\n");
+        return 1;
+    }
+    st = parse_uint(argv[3], &seed);
+    if (st != ST_OK) {
+        fprintf(stderr, "Неверное переданное число '%s'\n", argv[3]);
+        return 1;
+    }
+    cand_count = (size_t)(argc - 3);
+    cand = (char **)malloc(cand_count * sizeof(char *));
+    if (cand == NULL) {
+        fprintf(stderr, "Ошибка памяти\n");
+        return 1;
+    }
+    cand[0] = argv[2];                       
+    j = 1;
+    for (k = 4; k < (size_t)argc; ++k) {     
+        cand[j++] = argv[k];
+    }
+    srand(seed);
+    st = do_c((char *const *)cand, cand_count, seed, &res);
+    free(cand);
+
+    if (st == ST_OK) { print_line(res); free(res); }
+    break;
+}
+    default:
+        fprintf(stderr, "Неизвестный флаг'%s'\n", flag);
+        return 1;
+    }
+
+    if (st != ST_OK) {
+        switch (st) {
+        case ST_ERR_ALLOC:
+            fprintf(stderr, "Ошибка выделения памяти\n");
+            break;
+        case ST_ERR_ARG_EMPTY:
+            fprintf(stderr, "Неверный аргумент\n");
+            break;
+        case ST_ERR_ARG_NUM:
+            fprintf(stderr, "Неверное число\n");
+            break;
+        case ST_ERR_OUT_OF_RANGE:
+            fprintf(stderr, "Значение вне диапозона\n");
+            break;
+        default:
+            fprintf(stderr, "Неизвестный статус %d\n", (int)st);
+            break;
+        }
+        return 1;
+    }
+    return 0;
+}
