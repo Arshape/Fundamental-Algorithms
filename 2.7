@@ -1,0 +1,202 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <math.h>
+
+#define EPS 1e-9 
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ALLOC,
+    ST_ERR_ARG
+} Status;
+
+typedef struct {
+    size_t n;
+    double *coords;
+} Vector;
+
+typedef double (*NormFunc)(const Vector *v, void *ctx);
+
+typedef struct {
+    const Vector **vectors;
+    size_t count;
+    double max_norm;
+} NormResult;
+
+static double norm_inf(const Vector *v, void *ctx) {
+    size_t i;
+    double m = 0.0;
+    (void)ctx;
+    if (v == NULL || v->n == 0) return 0.0;
+    for (i = 0; i < v->n; ++i) {
+        double a = fabs(v->coords[i]);
+        if (a > m) m = a;
+    }
+    return m;
+}
+
+static double norm_p(const Vector *v, void *ctx) {
+    size_t i;
+    double p, sum = 0.0;
+    if (v == NULL || ctx == NULL) return 0.0;
+    p = *(const double *)ctx;
+    if (p < 1.0) p = 1.0;
+    for (i = 0; i < v->n; ++i) {
+        sum += pow(fabs(v->coords[i]), p);
+    }
+    return pow(sum, 1.0 / p);
+}
+
+static double norm_A(const Vector *v, void *ctx) {
+    size_t i, j;
+    const double *A = (const double *)ctx;
+    double sum = 0.0;
+    if (v == NULL || A == NULL) return 0.0;
+    for (i = 0; i < v->n; ++i) {
+        double Ax_i = 0.0;
+        for (j = 0; j < v->n; ++j) {
+            Ax_i += A[i * v->n + j] * v->coords[j];
+        }
+        sum += Ax_i * v->coords[i];
+    }
+    if (sum < 0.0) sum = 0.0;
+    return sqrt(sum);
+}
+
+Status find_longest(size_t n, size_t vec_count, size_t norm_count, NormResult **out_results, ...){
+    va_list ap;
+    const Vector **vecs = NULL;
+    NormResult *results = NULL;
+    size_t i, k;
+    Status st = ST_OK;
+
+    if (out_results == NULL) return ST_ERR_ARG;
+    *out_results = NULL;
+    if (n == 0 || vec_count == 0) return ST_ERR_ARG;
+
+    vecs = (const Vector **)malloc(vec_count * sizeof(const Vector *));
+    if (vecs == NULL) return ST_ERR_ALLOC;
+
+    va_start(ap, out_results);
+    for (i = 0; i < vec_count; ++i) {
+        vecs[i] = va_arg(ap, const Vector *);
+        if (vecs[i] == NULL || vecs[i]->n != n) {
+            free(vecs);
+            va_end(ap);
+            return ST_ERR_ARG;
+        }
+    }
+    results = (NormResult *)calloc(norm_count, sizeof(NormResult));
+    if (results == NULL) { free(vecs); va_end(ap); return ST_ERR_ALLOC; }
+
+    for (k = 0; k < norm_count && st == ST_OK; ++k) {
+        NormFunc fn = va_arg(ap, NormFunc);
+        void *ctx = va_arg(ap, void *);
+        
+        const Vector **best_vecs = NULL;
+        size_t best_count = 0;
+        size_t best_cap = 0;
+        double best_val = 0.0;
+
+        if (fn == NULL) { st = ST_ERR_ARG; break; }
+
+        for (i = 0; i < vec_count; ++i) {
+            double val = fn(vecs[i], ctx);
+
+            if (i == 0 || val > best_val + EPS) {
+                best_val = val;
+                best_count = 0; 
+            }
+            if (i == 0 || fabs(val - best_val) < EPS) {
+                if (best_count == best_cap) {
+                    size_t new_cap = (best_cap == 0) ? 4 : best_cap * 2;
+                    const Vector **tmp = (const Vector **)realloc(
+                        best_vecs, new_cap * sizeof(const Vector *)
+                    );
+                    if (tmp == NULL) {
+                        st = ST_ERR_ALLOC;
+                        break; 
+                    }
+                    best_vecs = tmp;
+                    best_cap = new_cap;
+                }
+                best_vecs[best_count++] = vecs[i];
+            }
+        }
+        if (st != ST_OK) {
+            free(best_vecs);
+            break;
+        }
+        results[k].vectors = best_vecs;
+        results[k].count = best_count;
+        results[k].max_norm = best_val;
+    }
+    va_end(ap);
+    if (st != ST_OK) {
+        for (k = 0; k < norm_count; ++k) {
+            free(results[k].vectors);
+        }
+        free(results);
+        free(vecs);
+        return st;
+    }
+    *out_results = results;
+    free(vecs);
+    return ST_OK;
+}
+
+static void free_results(NormResult *res, size_t norm_count) {
+    size_t k;
+    if (res == NULL) return;
+    for (k = 0; k < norm_count; ++k) free(res[k].vectors);
+    free(res);
+}
+
+int main(void) {
+    Vector v1 = {3, (double[]){2.0, 0.0, 0.0}};
+    Vector v2 = {3, (double[]){3.0, 1.0, 0.0}};
+    Vector v3 = {3, (double[]){1.0, 1.0, -2.0}};
+    Vector v4 = {3, (double[]){1.0, 1.0, 3.0}};
+    Vector v5 = {3, (double[]){-2.0, -3.0, -2.0}};
+
+    double p1 = 1.0, p2 = 2.0, p3 = 3.0;
+    double A[9] = {
+        2.0, 0.0, 0.0,
+        0.0, 3.0, 0.0,
+        0.0, 0.0, 4.0
+    };
+    NormResult *res = NULL;
+    Status st;
+    size_t i, k;
+    const char *names[5] = {"norm_inf", "norm_p=1", "norm_p=2", "norm_p=3", "norm_A"};
+
+    st = find_longest(3, 5, 5, &res,
+                      &v1, &v2, &v3, &v4, &v5,
+                      norm_inf, (void *)NULL,
+                      norm_p,   (void *)&p1,
+                      norm_p,   (void *)&p2,
+                      norm_p,   (void *)&p3,
+                      norm_A,   (void *)A);
+    if (st != ST_OK) {
+        fprintf(stderr, "Ошибка %d\n", (int)st);
+        return 1;
+    }
+
+    for (k = 0; k < 5; ++k) {
+        printf("%s\n", names[k]);
+        printf("  max norm = %g, count = %zu\n", res[k].max_norm, res[k].count);
+        for (i = 0; i < res[k].count; ++i) {
+            const Vector *v = res[k].vectors[i];
+            size_t j;
+            printf("  vector: [");
+            for (j = 0; j < v->n; ++j) {
+                printf("%g%s", v->coords[j], (j + 1 < v->n) ? ", " : "");
+            }
+            printf("]\n");
+        }
+    }
+
+    free_results(res, 5);
+    return 0;
+}
