@@ -1,0 +1,367 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ALLOC,
+    ST_ERR_INPUT,
+    ST_ERR_ARG
+} Status;
+
+typedef struct {
+    char *name;                
+    unsigned int size;         
+    unsigned int importance;   
+} File;
+
+typedef struct {
+    size_t *indexes;           
+    size_t count;
+    unsigned long long total_size;
+    unsigned long long total_importance;
+} Selection;
+
+static int is_space(char c){
+    return c == ' ' || c == '\t' || c == '\n';
+}
+
+static Status read_line(FILE *f, char **line, size_t *line_cap,size_t *out_len, int *out_eof){
+    size_t len = 0;
+    int ch;
+
+    *out_eof = 0;
+    for (;;) {
+        ch = fgetc(f);
+        if (ch == EOF) { *out_eof = 1; break; }
+        if (ch == '\n') break;
+        if (len + 1 >= *line_cap) {
+            size_t new_cap = (*line_cap == 0) ? 128 : *line_cap * 2;
+            char *tmp = (char *)realloc(*line, new_cap);
+            if (tmp == NULL){
+                return ST_ERR_ALLOC;
+            }
+            *line = tmp;
+            *line_cap = new_cap;
+        }
+        (*line)[len++] = (char)ch;
+    }
+    *out_len = len;
+    return ST_OK;
+}
+
+static int str_compare(const char *a, const char *b){
+    size_t i = 0;
+    while (a[i] != '\0' && b[i] != '\0') {
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
+        if (ca != cb) return (ca < cb) ? -1 : 1;
+        ++i;
+    }
+    if (a[i] == '\0' && b[i] == '\0') return 0;
+    return (a[i] == '\0') ? -1 : 1;
+}
+
+static Status parse_uint(const char *s, size_t len, unsigned int *out){
+    unsigned long long acc = 0;
+    size_t i;
+
+    if (s == NULL || out == NULL || len == 0) return ST_ERR_INPUT;
+    for (i = 0; i < len; ++i) {
+        if (s[i] < '0' || s[i] > '9') return ST_ERR_INPUT;
+        acc = acc * 10ULL + (unsigned long long)(s[i] - '0');
+        if (acc > (unsigned long long)UINT_MAX) return ST_ERR_INPUT;
+    }
+    *out = (unsigned int)acc;
+    return ST_OK;
+}
+
+static Status parse_file_line(const char *line, size_t len, File *out){
+    size_t i = 0;
+    size_t name_start, name_len;
+    size_t tok_start[2], tok_len[2];
+    int t;
+    unsigned int size = 0, imp = 0;
+    char *name = NULL;
+    Status st;
+
+    if (line == NULL || out == NULL) return ST_ERR_INPUT;
+
+    while (i < len && is_space(line[i])) ++i;
+
+    name_start = i;
+    while (i < len && !is_space(line[i])) ++i;
+    name_len = i - name_start;
+    if (name_len == 0) return ST_ERR_INPUT;
+
+    for (t = 0; t < 2; ++t) {
+        while (i < len && is_space(line[i])) ++i;
+        tok_start[t] = i;
+        while (i < len && !is_space(line[i])) ++i;
+        tok_len[t] = i - tok_start[t];
+        if (tok_len[t] == 0) return ST_ERR_INPUT;
+    }
+    while (i < len && is_space(line[i])) ++i;
+    if (i < len) return ST_ERR_INPUT;
+
+    st = parse_uint(&line[tok_start[0]], tok_len[0], &size);
+    if (st != ST_OK) return st;
+    st = parse_uint(&line[tok_start[1]], tok_len[1], &imp);
+    if (st != ST_OK) return st;
+
+    if (size == 0) return ST_ERR_INPUT;   
+
+    name = (char *)malloc(name_len + 1);
+    if (name == NULL) return ST_ERR_ALLOC;
+    for (i = 0; i < name_len; ++i) name[i] = line[name_start + i];
+    name[name_len] = '\0';
+
+    out->name = name;
+    out->size = size;
+    out->importance = imp;
+    return ST_OK;
+}
+
+static void free_files(File *files, size_t n){
+    size_t i;
+    if (files == NULL) return;
+    for (i = 0; i < n; ++i) free(files[i].name);
+    free(files);
+}
+
+static void free_selection(Selection *sel){
+    if (sel == NULL) return;
+    free(sel->indexes);
+    sel->indexes = NULL;
+    sel->count = 0;
+    sel->total_size = 0;
+    sel->total_importance = 0;
+}
+
+static Status read_input(File **out_files, size_t *out_n, unsigned int *out_capacity){
+    char *line = NULL;
+    size_t line_cap = 0, line_len = 0;
+    int eof = 0;
+    Status st;
+    File *files = NULL;
+    size_t n = 0, i;
+    unsigned int capacity = 0;
+    size_t tok_start[2], tok_len[2];
+    int t;
+
+    if (out_files == NULL || out_n == NULL || out_capacity == NULL)
+        return ST_ERR_ARG;
+
+    st = read_line(stdin, &line, &line_cap, &line_len, &eof);
+    if (st != ST_OK) { free(line); return st; }
+    if (eof && line_len == 0) { free(line); return ST_ERR_INPUT; }
+
+    {
+        size_t pos = 0;
+        for (t = 0; t < 2; ++t) {
+            while (pos < line_len && is_space(line[pos])) ++pos;
+            tok_start[t] = pos;
+            while (pos < line_len && !is_space(line[pos])) ++pos;
+            tok_len[t] = pos - tok_start[t];
+            if (tok_len[t] == 0) { free(line); return ST_ERR_INPUT; }
+        }
+        while (pos < line_len && is_space(line[pos])) ++pos;
+        if (pos < line_len) { free(line); return ST_ERR_INPUT; }
+
+        {
+            unsigned int n_u = 0;
+            st = parse_uint(&line[tok_start[0]], tok_len[0], &n_u);
+            if (st != ST_OK) { free(line); return st; }
+            if (n_u == 0) { free(line); return ST_ERR_INPUT; }
+            n = (size_t)n_u;
+        }
+        st = parse_uint(&line[tok_start[1]], tok_len[1], &capacity);
+        if (st != ST_OK) { free(line); return st; }
+    }
+    files = (File *)malloc(n * sizeof(File));
+    if (files == NULL) { free(line); return ST_ERR_ALLOC; }
+    for (i = 0; i < n; ++i) {
+        files[i].name = NULL;
+        files[i].size = 0;
+        files[i].importance = 0;
+    }
+    for (i = 0; i < n; ++i) {
+        size_t pos;
+        size_t k;
+
+        st = read_line(stdin, &line, &line_cap, &line_len, &eof);
+        if (st != ST_OK) { free_files(files, i); free(line); return st; }
+        if (eof && line_len == 0) {
+            free_files(files, i);
+            free(line);
+            return ST_ERR_INPUT;
+        }
+
+        pos = 0;
+        while (pos < line_len && is_space(line[pos])) ++pos;
+        if (pos == line_len) {
+            free_files(files, i);
+            free(line);
+            return ST_ERR_INPUT;
+        }
+
+        st = parse_file_line(line, line_len, &files[i]);
+        if (st != ST_OK) { free_files(files, i); free(line); return st; }
+
+        for (k = 0; k < i; ++k) {
+            if (str_compare(files[k].name, files[i].name) == 0) {
+                free_files(files, i + 1);
+                free(line);
+                return ST_ERR_INPUT;
+            }
+        }
+    }
+    free(line);
+    *out_files = files;
+    *out_n = n;
+    *out_capacity = capacity;
+    return ST_OK;
+}
+
+static Status select(const File *files, size_t n, unsigned int capacity, Selection *out_sel){
+    unsigned long long *dp = NULL;     
+    unsigned char *choice = NULL;      
+    size_t i;
+    unsigned int w;
+    unsigned long long total_sz = 0, total_imp = 0;
+    size_t cnt = 0;
+    Status st = ST_OK;
+
+    if (files == NULL || out_sel == NULL) return ST_ERR_ARG;
+
+    out_sel->indexes = NULL;
+    out_sel->count = 0;
+    out_sel->total_size = 0;
+    out_sel->total_importance = 0;
+
+    if (n == 0 || capacity == 0) return ST_OK;
+
+    dp = (unsigned long long *)calloc((size_t)capacity + 1, sizeof(unsigned long long));
+    if (dp == NULL) return ST_ERR_ALLOC;
+
+    for (i = 0; i < n; ++i) {
+        unsigned int sz = files[i].size;
+        unsigned long long imp = (unsigned long long)files[i].importance;
+        if (sz > capacity) continue;
+        for (w = capacity; w >= sz; --w) {
+            unsigned long long cand = dp[w - sz] + imp;
+            if (cand > dp[w]) dp[w] = cand;
+        }
+    }
+
+    choice = (unsigned char *)calloc(n, 1);
+    if (choice == NULL) { free(dp); return ST_ERR_ALLOC; }
+
+    {
+        unsigned int rem = capacity;
+        unsigned long long cur = dp[capacity];
+        size_t j = n;
+        while (j > 0 && cur > 0) {
+            --j;
+            unsigned int sz = files[j].size;
+            unsigned long long imp = (unsigned long long)files[j].importance;
+            if (sz > rem) continue;
+            if (dp[rem - sz] + imp == cur) {
+                choice[j] = 1;
+                rem -= sz;
+                cur -= imp;
+            }
+        }
+    }
+
+    for (i = 0; i < n; ++i) {
+        if (choice[i]) {
+            ++cnt;
+            total_sz += files[i].size;
+            total_imp += files[i].importance;
+        }
+    }
+
+    free(dp);
+
+    if (cnt == 0) {
+        free(choice);
+        return ST_OK; 
+    }
+
+    out_sel->indexes = (size_t *)malloc(cnt * sizeof(size_t));
+    if (out_sel->indexes == NULL) { free(choice); return ST_ERR_ALLOC; }
+
+    {
+        size_t k = 0;
+        for (i = 0; i < n; ++i) {
+            if (choice[i]) out_sel->indexes[k++] = i;
+        }
+    }
+    free(choice);
+
+    out_sel->count = cnt;
+    out_sel->total_size = total_sz;
+    out_sel->total_importance = total_imp;
+    (void)st;
+    return ST_OK;
+}
+
+static void print_selection(FILE *out, const Selection *sel, const File *files){
+    size_t i;
+    fprintf(out, "TOTAL SIZE %llu\n", sel->total_size);
+    fprintf(out, "TOTAL IMPORTANCE %llu\n", sel->total_importance);
+    fprintf(out, "FILES %zu\n", sel->count);
+    for (i = 0; i < sel->count; ++i) {
+        fprintf(out, "%s\n", files[sel->indexes[i]].name);
+    }
+}
+
+static void print_status(Status st)
+{
+    switch (st) {
+    case ST_OK:
+        break;
+    case ST_ERR_ALLOC:
+        fprintf(stderr, "Ошибка памяти\n");
+        break;
+    case ST_ERR_INPUT:
+        fprintf(stderr, "Неверный ввод\n");
+        break;
+    case ST_ERR_ARG:
+        fprintf(stderr, "Неверные аргументы\n");
+        break;
+    default:
+        fprintf(stderr, "Неизвестный статус\n");
+        break;
+    }
+}
+
+int main(void){
+    File *files = NULL;
+    size_t n = 0;
+    unsigned int capacity = 0;
+    Selection sel;
+    Status st;
+
+    sel.indexes = NULL;
+    sel.count = 0;
+    sel.total_size = 0;
+    sel.total_importance = 0;
+
+    st = read_input(&files, &n, &capacity);
+    if (st != ST_OK) { print_status(st); return 1; }
+
+    st = select(files, n, capacity, &sel);
+    if (st != ST_OK) {
+        free_files(files, n);
+        print_status(st);
+        return 1;
+    }
+
+    print_selection(stdout, &sel, files);
+
+    free_selection(&sel);
+    free_files(files, n);
+    return 0;
+}
