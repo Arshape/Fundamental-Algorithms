@@ -1,0 +1,324 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <ctype.h>
+
+typedef struct {
+    const char *str;  
+    FILE *stream;     
+    int is_stream;
+    size_t pos;      
+    int last_char;    
+    int has_unget;
+} Reader;
+
+static void reader_init_str(Reader *r, const char *s) {
+    r->str = s;
+    r->stream = NULL;
+    r->is_stream = 0;
+    r->pos = 0;
+    r->has_unget = 0;
+}
+
+static void reader_init_stream(Reader *r, FILE *f) {
+    r->str = NULL;
+    r->stream = f;
+    r->is_stream = 1;
+    r->pos = 0;
+    r->has_unget = 0;
+}
+
+static int reader_get(Reader *r) {
+    if (r->has_unget) {
+        r->has_unget = 0;
+        return r->last_char;
+    }
+    if (r->is_stream) {
+        return fgetc(r->stream);
+    } else {
+        char c = r->str[r->pos];
+        if (c == '\0') return EOF;
+        r->pos++;
+        return (unsigned char)c;
+    }
+}
+
+static void reader_unget(Reader *r, int c) {
+    if (c == EOF) return;
+    r->last_char = c;
+    r->has_unget = 1;
+}
+
+
+static int is_space(int c) {
+    return c == ' ' || c == '\t' || c == '\n';
+}
+
+static void skip_whitespace(Reader *r) {
+    int c;
+    do {
+        c = reader_get(r);
+    } while (is_space(c));
+    reader_unget(r, c);
+}
+
+static int roman_value(int c) {
+    switch (c) {
+        case 'I': case 'i': return 1;
+        case 'V': case 'v': return 5;
+        case 'X': case 'x': return 10;
+        case 'L': case 'l': return 50;
+        case 'C': case 'c': return 100;
+        case 'D': case 'd': return 500;
+        case 'M': case 'm': return 1000;
+        default: return 0;
+    }
+}
+
+static int parse_roman(Reader *r, int *out) {
+    int c, total = 0, prev = 0;
+    int has_digit = 0;
+
+    skip_whitespace(r);
+
+    while ((c = reader_get(r)) != EOF && roman_value(c) > 0) {
+        int val = roman_value(c);
+        if (prev > 0 && prev < val) {
+            total -= prev;
+            total += val - prev;
+        } else {
+            total += val;
+        }
+        prev = val;
+        has_digit = 1;
+    }
+    reader_unget(r, c);
+
+    if (!has_digit) return 0;
+    *out = total;
+    return 1;
+}
+
+static int parse_zeckendorf(Reader *r, unsigned int *out) {
+    unsigned long long fib[64];
+    size_t nfib = 0, i;
+    int c, started = 0;
+    unsigned long long val = 0;
+    int digits[64];
+    size_t nd = 0;
+
+    
+    fib[0] = 1; fib[1] = 2;
+    nfib = 2;
+    while (nfib < 64) {
+        fib[nfib] = fib[nfib-1] + fib[nfib-2];
+        nfib++;
+    }
+
+    skip_whitespace(r);
+
+    while ((c = reader_get(r)) != EOF && (c == '0' || c == '1')) {
+        if (nd >= 64) break;
+        digits[nd++] = c - '0';
+        started = 1;
+    }
+    reader_unget(r, c);
+
+    if (!started || nd < 2) return 0;
+
+    for (i = 0; i < nd - 1; ++i) {
+        if (digits[i] == 1) {
+            val += fib[i];
+        }
+    }
+
+    *out = (unsigned int)val;
+    return 1;
+}
+
+static int parse_base(Reader *r, int *out, int base, int upper) {
+    int c, sign = 1;
+    long long val = 0;
+    int has_digit = 0;
+
+    skip_whitespace(r);
+
+    c = reader_get(r);
+    if (c == '-') {
+        sign = -1;
+        c = reader_get(r);
+    } else if (c == '+') {
+        c = reader_get(r);
+    }
+    reader_unget(r, c);
+
+    while ((c = reader_get(r)) != EOF) {
+        int d = -1;
+        if (c >= '0' && c <= '9') {
+            d = c - '0';
+        } else if (!upper && c >= 'a' && c <= 'z') {
+            d = c - 'a' + 10;
+        } else if (upper && c >= 'A' && c <= 'Z') {
+            d = c - 'A' + 10;
+        } else {
+            break;
+        }
+
+        if (d >= base) break;
+
+        val = val * base + d;
+        has_digit = 1;
+    }
+    reader_unget(r, c);
+
+    if (!has_digit) return 0;
+    *out = (int)(sign * val);
+    return 1;
+}
+
+static int overscanf_core(Reader *r, const char *fmt, va_list ap) {
+    const char *p = fmt;
+    int assigned = 0;
+
+    while (*p != '\0') {
+        if (is_space((unsigned char)*p)) {
+            skip_whitespace(r);
+            p++;
+            continue;
+        }
+
+        if (*p != '%') {
+            int c = reader_get(r);
+            if (c != *p) {
+                reader_unget(r, c);
+                break; 
+            }
+            p++;
+            continue;
+        }
+        p++;
+        if (*p == '%') {
+            int c = reader_get(r);
+            if (c == '%') { p++; continue; }
+            reader_unget(r, c);
+            break;
+        }
+
+        if (p[0] == 'R' && p[1] == 'o') {
+            int *ptr = va_arg(ap, int *);
+            if (parse_roman(r, ptr)) assigned++;
+            p += 2;
+            continue;
+        }
+        if (p[0] == 'Z' && p[1] == 'r') {
+            unsigned int *ptr = va_arg(ap, unsigned int *);
+            if (parse_zeckendorf(r, ptr)) assigned++;
+            p += 2;
+            continue;
+        }
+        if (p[0] == 'C' && p[1] == 'v') {
+            int *ptr = va_arg(ap, int *);
+            int base = va_arg(ap, int);
+            if (base < 2 || base > 36) base = 10;
+            if (parse_base(r, ptr, base, 0)) assigned++;
+            p += 2;
+            continue;
+        }
+        if (p[0] == 'C' && p[1] == 'V') {
+            int *ptr = va_arg(ap, int *);
+            int base = va_arg(ap, int);
+            if (base < 2 || base > 36) base = 10;
+            if (parse_base(r, ptr, base, 1)) assigned++;
+            p += 2;
+            continue;
+        }
+
+        if (*p == 'd') {
+            int *ptr = va_arg(ap, int *);
+            int c, sign = 1;
+            long long val = 0;
+            int has = 0;
+            skip_whitespace(r);
+            c = reader_get(r);
+            if (c == '-') { sign = -1; c = reader_get(r); }
+            while (c >= '0' && c <= '9') {
+                val = val * 10 + (c - '0');
+                has = 1;
+                c = reader_get(r);
+            }
+            reader_unget(r, c);
+            if (has) { *ptr = (int)(sign * val); assigned++; }
+            p++;
+            continue;
+        }
+        if (*p == 's') {
+            char *buf = va_arg(ap, char *);
+            int c;
+            size_t idx = 0;
+            skip_whitespace(r);
+            while ((c = reader_get(r)) != EOF && !is_space(c)) {
+                buf[idx++] = (char)c;
+            }
+            buf[idx] = '\0';
+            reader_unget(r, c);
+            assigned++;
+            p++;
+            continue;
+        }
+        break;
+    }
+
+    return assigned;
+}
+
+int overscanf(const char *format, ...) {
+    Reader r;
+    va_list ap;
+    int result;
+    reader_init_stream(&r, stdin);
+    va_start(ap, format);
+    result = overscanf_core(&r, format, ap);
+    va_end(ap);
+    return result;
+}
+
+int oversscanf(const char *str, const char *format, ...) {
+    Reader r;
+    va_list ap;
+    int result;
+    reader_init_str(&r, str);
+    va_start(ap, format);
+    result = overscanf_core(&r, format, ap);
+    va_end(ap);
+    return result;
+}
+
+int main(void) {
+    int x;
+    unsigned int u;
+    int v1, v2;
+
+    if (oversscanf("XIV", "%Ro", &x) == 1) {
+        printf("Roman XIV = %d\n", x); /* 14 */
+    }
+
+    if (oversscanf("01001", "%Zr", &u) == 1) {
+        printf("Zeckendorf 01001 -> %u\n", u);
+    }
+
+    if (oversscanf("ff", "%Cv", &v1, 16) == 1) {
+        printf("нижний ригистр ff -> %d\n", v1);
+    }
+    if (oversscanf("FFF", "%CV", &v2, 16) == 1) {
+        printf("верхний решистр FFF -> %d\n", v2); 
+    }
+
+    printf("\n Введите число, строку, число с основанием 8: ");
+    {
+        char buf[50];
+        if (overscanf("%d %s %Cv", &v1, buf, &v2, 8) == 3) {
+            printf("Read: %d, %s, %d\n", v1, buf, v2);
+        }
+    }
+    return 0;
+}
