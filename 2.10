@@ -1,0 +1,106 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ALLOC,
+    ST_ERR_ARG
+} Status;
+
+static Status gorner(const double *f, size_t m, double a, double eps, double *out_g, double **out_q){
+    double *b = NULL;
+    size_t k;
+    double g;
+
+    if (f == NULL || out_g == NULL || out_q == NULL) return ST_ERR_ARG;
+    *out_q = NULL;
+
+    b = (double *)malloc((m + 1) * sizeof(double));
+    if (b == NULL) return ST_ERR_ALLOC;
+
+    b[m] = f[m];                          
+    for (k = m; k > 0; --k) {
+        b[k - 1] = f[k - 1] + a * b[k];
+    }
+    g = b[0];
+    if (g > -eps && g < eps) g = 0.0;
+
+    if (m > 0) {
+        double *q = (double *)malloc(m * sizeof(double));
+        if (q == NULL) { free(b); return ST_ERR_ALLOC; }
+        for (k = 0; k < m; ++k) q[k] = b[k + 1];
+        *out_q = q;
+    }
+
+    free(b);
+    *out_g = g;
+    return ST_OK;
+}
+
+Status rebase(double eps, double a, double **out_g, int n, ...){
+    va_list ap;
+    double *f = NULL;    
+    double *g = NULL;    
+    size_t cur_m;        
+    size_t k;
+    Status st = ST_OK;
+
+    if (out_g == NULL) return ST_ERR_ARG;
+    *out_g = NULL;
+    if (n < 0) return ST_ERR_ARG;
+
+    f = (double *)malloc(((size_t)n + 1) * sizeof(double));
+    if (f == NULL) return ST_ERR_ALLOC;
+    g = (double *)malloc(((size_t)n + 1) * sizeof(double));
+    if (g == NULL) { free(f); return ST_ERR_ALLOC; }
+
+    va_start(ap, n);
+    for (k = 0; k <= (size_t)n; ++k) {
+        f[k] = va_arg(ap, double);
+    }
+    va_end(ap);
+
+    cur_m = (size_t)n;
+    for (k = 0; k <= (size_t)n; ++k) {
+        double gk = 0.0;
+        double *q = NULL;
+        st = gorner(f, cur_m, a, eps, &gk, &q);
+        if (st != ST_OK) { free(f); free(g); return st; }
+        g[k] = gk;
+        free(f);
+        f = q;                     
+        if (cur_m > 0) --cur_m;
+    }
+
+    free(f);   
+    *out_g = g;
+    return ST_OK;
+}
+
+int main(void){
+    double *g = NULL;
+    Status st;
+
+    printf("f(x) = 1 + 2x + 3x^2, a = 1\n");
+    st = rebase(1e-9, 1.0, &g, 2, 1.0, 2.0, 3.0);
+    if (st == ST_OK) {
+        printf("Коэффициенты разложения: g_0 = %g, g_1 = %g, g_2 = %g\n", g[0], g[1], g[2]);
+        free(g); 
+        g = NULL;
+    } else {
+        fprintf(stderr, "Ошибка %d\n", (int)st);
+    }
+
+    printf("\nf(x) = 5 - 3x + 2x^2 - x^3, a = 2\n");
+    st = rebase(1e-9, 2.0, &g, 3, 5.0, -3.0, 2.0, -1.0);
+    if (st == ST_OK) {
+        printf("Коэффициенты разложения: g_0 = %g, g_1 = %g, g_2 = %g, g_3 = %g\n",
+               g[0], g[1], g[2], g[3]);
+        free(g); 
+        g = NULL;
+    } else {
+        fprintf(stderr, "Ошибка %d\n", (int)st);
+    }
+    return 0;
+}
