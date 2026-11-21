@@ -1,0 +1,581 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <string.h>
+#include <limits.h>
+#include <stdint.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ARG,         
+    ST_ERR_ALLOC,        
+    ST_ERR_INPUT,       
+    ST_ERR_RANGE,        
+    ST_ERR_FILE_IN,      
+    ST_ERR_FILE_OUT,     
+    ST_ERR_EMPTY,
+    ST_ERR_SAME_FILE        
+} Status;
+
+#define EXAMS_COUNT 5u
+
+typedef struct {
+    unsigned int id;          
+    char *name;        
+    char *surname;     
+    char *group;       
+    unsigned char *grades;      
+} Student;
+
+void print_status(Status st){
+    switch (st) {
+    case ST_OK:
+        break;
+    case ST_ERR_ARG:
+        fprintf(stderr, "Ошибка: неверный аргумент\n");
+        break;
+    case ST_ERR_ALLOC:
+        fprintf(stderr, "Ошибка: не удалось выделить память\n");
+        break;
+    case ST_ERR_INPUT:
+        fprintf(stderr, "Ошибка: некорректные входные данные\n");
+        break;
+    case ST_ERR_RANGE:
+        fprintf(stderr, "Ошибка: значение вне допустимого диапазона\n");
+        break;
+    case ST_ERR_FILE_IN:
+        fprintf(stderr, "Ошибка: не удалось открыть входной файл\n");
+        break;
+    case ST_ERR_FILE_OUT:
+        fprintf(stderr, "Ошибка: не удалось открыть трассировочный файл\n");
+        break;
+    case ST_ERR_EMPTY:
+        fprintf(stderr, "Ошибка: нет данных\n");
+        break;
+    case ST_ERR_SAME_FILE:
+        fprintf(stderr, "Ошибка: трассировочный файл совпадает с входным\n");
+        break;
+    default:
+        fprintf(stderr, "Ошибка: неизвестный статус\n");
+        break;
+    }
+}
+
+int is_same_file(const char *path1, const char *path2){
+    struct stat st1, st2;
+    if (path1 == NULL || path2 == NULL) return -1;
+    if (stat(path1, &st1) != 0) return -1;
+    if (stat(path2, &st2) != 0) return 0;
+    return (st1.st_dev == st2.st_dev && st1.st_ino == st2.st_ino) ? 1 : 0;
+}
+
+void free_student(Student *s){
+    if (s == NULL) return;
+    free(s->name);
+    free(s->surname);
+    free(s->group);
+    free(s->grades);
+    s->name = NULL;
+    s->surname = NULL;
+    s->group = NULL;
+    s->grades = NULL;
+}
+
+void free_students(Student *arr, size_t count){
+    if (arr == NULL) return;
+    for (size_t i = 0; i < count; ++i) free_student(&arr[i]);
+    free(arr);
+}
+
+int is_alpha(char c){
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+int is_digit(char c){
+    return c >= '0' && c <= '9';
+}
+
+Status copy(const char *s, size_t len, char **out){
+    if (s == NULL || out == NULL) return ST_ERR_ARG;
+    char *p = (char *)malloc(len + 1u);
+    if (p == NULL) return ST_ERR_ALLOC;
+    for (size_t i = 0; i < len; ++i) p[i] = s[i];
+    p[len] = '\0';
+    *out = p;
+    return ST_OK;
+}
+
+Status parse_student_line(const char *line, Student *out){
+    if (line == NULL || out == NULL) return ST_ERR_ARG;
+
+    const char *p = line;
+    Student s;
+    s.id = 0; s.name = NULL; s.surname = NULL; s.group = NULL; s.grades = NULL;
+
+    
+    if (*p < '0' || *p > '9') return ST_ERR_INPUT;
+    unsigned long long id_acc = 0;
+    while (*p >= '0' && *p <= '9') {
+        id_acc = id_acc * 10ULL + (unsigned long long)(*p - '0');
+        if (id_acc > (unsigned long long)UINT_MAX) return ST_ERR_RANGE;
+        ++p;
+    }
+    s.id = (unsigned int)id_acc;
+
+    
+    while (*p == ' ' || *p == '\t') ++p;
+    const char *tok_start = p;
+    while (is_alpha(*p)) ++p;
+    if (p == tok_start) return ST_ERR_INPUT;
+    Status st = copy(tok_start, (size_t)(p - tok_start), &s.name);
+    if (st != ST_OK) return st;
+
+    
+    while (*p == ' ' || *p == '\t') ++p;
+    tok_start = p;
+    while (is_alpha(*p)) ++p;
+    if (p == tok_start) { free_student(&s); return ST_ERR_INPUT; }
+    st = copy(tok_start, (size_t)(p - tok_start), &s.surname);
+    if (st != ST_OK) { free_student(&s); return st; }
+
+    
+    while (*p == ' ' || *p == '\t') ++p;
+    tok_start = p;
+    while (*p != '\0' && *p != ' ' && *p != '\t') ++p;
+    if (p == tok_start) { free_student(&s); return ST_ERR_INPUT; }
+    st = copy(tok_start, (size_t)(p - tok_start), &s.group);
+    if (st != ST_OK) { free_student(&s); return st; }
+
+    
+    s.grades = (unsigned char *)malloc(EXAMS_COUNT * sizeof(unsigned char));
+    if (s.grades == NULL) { free_student(&s); return ST_ERR_ALLOC; }
+
+    for (size_t g = 0; g < EXAMS_COUNT; ++g) {
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!is_digit(*p)) { free_student(&s); return ST_ERR_INPUT; }
+        unsigned long long acc = 0;
+        while (is_digit(*p)) {
+            acc = acc * 10ULL + (unsigned long long)(*p - '0');
+            if (acc > 255ULL) { free_student(&s); return ST_ERR_RANGE; }
+            ++p;
+        }
+        s.grades[g] = (unsigned char)acc;
+    }
+
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p != '\0') { free_student(&s); return ST_ERR_INPUT; }
+
+    *out = s;
+    return ST_OK;
+}
+
+Status read_line(FILE *f, char **line, size_t *cap, size_t *out_len, int *out_eof){
+    size_t len = 0;
+    int ch;
+    *out_eof = 0;
+
+    while(1) {
+        ch = fgetc(f);
+        if (ch == EOF) { *out_eof = 1; break; }
+        if (ch == '\n') break;
+
+        if (len + 1 >= *cap) {
+            size_t new_cap = (*cap == 0) ? 128 : *cap * 2;
+            char *tmp = (char *)realloc(*line, new_cap);
+            if (tmp == NULL) return ST_ERR_ALLOC;
+            *line = tmp;
+            *cap = new_cap;
+        }
+        (*line)[len++] = (char)ch;
+    }
+    if (len > 0 && (*line)[len - 1] == '\r') --len;
+    (*line)[len] = '\0';
+    *out_len = len;
+    return ST_OK;
+}
+
+Status read_students(const char *path, Student **out_arr, size_t *out_n){
+    if (path == NULL || out_arr == NULL || out_n == NULL) return ST_ERR_ARG;
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) return ST_ERR_FILE_IN;
+
+    Student *arr = NULL;
+    size_t count = 0, cap = 0;
+    char *line = NULL;
+    size_t line_cap = 0;
+    Status st = ST_OK;
+    int eof = 0;
+
+    while (st == ST_OK && !eof) {
+        size_t len = 0;
+        st = read_line(f, &line, &line_cap, &len, &eof);
+        if (st != ST_OK) break;
+        if (len == 0) { if (eof) break; else continue; }
+
+        if (count == cap) {
+            size_t new_cap = (cap == 0) ? 8 : cap * 2;
+            Student *tmp = (Student *)realloc(arr, new_cap * sizeof(Student));
+            if (tmp == NULL) { st = ST_ERR_ALLOC; break; }
+            arr = tmp;
+            cap = new_cap;
+        }
+        st = parse_student_line(line, &arr[count]);
+        if (st != ST_OK) break;
+        ++count;
+    }
+
+    if (st == ST_OK && count == 0) st = ST_ERR_EMPTY;
+
+    if (st == ST_OK) {
+        *out_arr = arr;
+        *out_n   = count;
+        arr = NULL;
+    }
+
+    free(line);
+    free_students(arr, count);
+    fclose(f);
+    return st;
+}
+
+double student_avg(const Student *s){
+    unsigned sum = 0;
+    for (size_t i = 0; i < EXAMS_COUNT; ++i) sum += s->grades[i];
+    return (double)sum / (double)EXAMS_COUNT;
+}
+
+double global_avg(const Student *arr, size_t n){
+    if (n == 0) return 0.0;
+    double total = 0.0;
+    for (size_t i = 0; i < n; ++i) total += student_avg(&arr[i]);
+    return total / (double)n;
+}
+
+int cmp_by_id(const void *pa, const void *pb){
+    const Student *a = (const Student *)pa;
+    const Student *b = (const Student *)pb;
+    if (a->id < b->id) return -1;
+    if (a->id > b->id) return  1;
+    return 0;
+}
+
+int cmp_str(const char *a, const char *b){
+    return strcmp(a, b);
+}
+
+int cmp_by_surname(const void *pa, const void *pb){
+    const Student *a = (const Student *)pa;
+    const Student *b = (const Student *)pb;
+    int c = cmp_str(a->surname, b->surname);
+    if (c != 0) return c;
+    c = cmp_str(a->name, b->name);
+    if (c != 0) return c;
+    return cmp_by_id(pa, pb);
+}
+
+int cmp_by_name(const void *pa, const void *pb){
+    const Student *a = (const Student *)pa;
+    const Student *b = (const Student *)pb;
+    int c = cmp_str(a->name, b->name);
+    if (c != 0) return c;
+    c = cmp_str(a->surname, b->surname);
+    if (c != 0) return c;
+    return cmp_by_id(pa, pb);
+}
+
+int cmp_by_group(const void *pa, const void *pb){
+    const Student *a = (const Student *)pa;
+    const Student *b = (const Student *)pb;
+    int c = cmp_str(a->group, b->group);
+    if (c != 0) return c;
+    c = cmp_str(a->surname, b->surname);
+    if (c != 0) return c;
+    c = cmp_str(a->name, b->name);
+    if (c != 0) return c;
+    return cmp_by_id(pa, pb);
+}
+
+void print_student(const Student *s){
+    printf("id=%u  %s %s  группа=%s  ср.балл=%.2f\n",
+           s->id, s->name, s->surname, s->group, student_avg(s));
+}
+
+void search_by_id(const Student *arr, size_t n, unsigned int id){
+    int found = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (arr[i].id == id) { print_student(&arr[i]); found = 1; }
+    }
+    if (!found) printf("Не найдено\n");
+}
+
+void search_by_surname(const Student *arr, size_t n, const char *key){
+    int found = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (strcmp(arr[i].surname, key) == 0) { print_student(&arr[i]); found = 1; }
+    }
+    if (!found) printf("Не найдено\n");
+}
+
+void search_by_name(const Student *arr, size_t n, const char *key){
+    int found = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (strcmp(arr[i].name, key) == 0) { print_student(&arr[i]); found = 1; }
+    }
+    if (!found) printf("Не найдено\n");
+}
+
+void search_by_group(const Student *arr, size_t n, const char *key){
+    int found = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (strcmp(arr[i].group, key) == 0) { print_student(&arr[i]); found = 1; }
+    }
+    if (!found) printf("Не найдено\n");
+}
+
+Status trace_by_id(const char *trace_path, const Student *arr, size_t n, unsigned int id){
+    if (trace_path == NULL || arr == NULL) return ST_ERR_ARG;
+
+    FILE *f = fopen(trace_path, "w");
+    if (f == NULL) return ST_ERR_FILE_OUT;
+
+    int found = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (arr[i].id == id) {
+            if (fprintf(f, "id=%u  %s %s  группа=%s  ср.балл=%.2f\n",
+                        arr[i].id, arr[i].name, arr[i].surname,
+                        arr[i].group, student_avg(&arr[i])) < 0) {
+                fclose(f);
+                return ST_ERR_INPUT;
+            }
+            found = 1;
+        }
+    }
+    if (!found) {
+        if (fprintf(f, "Студент с id=%u не найден\n", id) < 0) {
+            fclose(f);
+            return ST_ERR_INPUT;
+        }
+    }
+    if (fclose(f) != 0) return ST_ERR_INPUT;
+    return ST_OK;
+}
+
+Status trace_above_avg(const char *trace_path, const Student *arr, size_t n){
+    if (trace_path == NULL || arr == NULL) return ST_ERR_ARG;
+
+    FILE *f = fopen(trace_path, "w");
+    if (f == NULL) return ST_ERR_FILE_OUT;
+
+    double avg = global_avg(arr, n);
+    if (fprintf(f, "Средний балл по всем: %.2f\n", avg) < 0) {
+        fclose(f);
+        return ST_ERR_INPUT;
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (student_avg(&arr[i]) > avg) {
+            if (fprintf(f, "%s %s (ср.балл=%.2f)\n",
+                        arr[i].surname, arr[i].name,
+                        student_avg(&arr[i])) < 0) {
+                fclose(f);
+                return ST_ERR_INPUT;
+            }
+        }
+    }
+    if (fclose(f) != 0) return ST_ERR_INPUT;
+    return ST_OK;
+}
+
+void print_menu(void){
+    printf("\n=== Меню ===\n");
+    printf("1. Поиск по id\n");
+    printf("2. Поиск по фамилии\n");
+    printf("3. Поиск по имени\n");
+    printf("4. Поиск по группе\n");
+    printf("5. Сортировка по id\n");
+    printf("6. Сортировка по фамилии\n");
+    printf("7. Сортировка по имени\n");
+    printf("8. Сортировка по группе\n");
+    printf("9. Трассировка: данные студента по id\n");
+    printf("10. Трассировка: студенты с баллом выше среднего\n");
+    printf("11. Вывести всех\n");
+    printf("0. Выход\n");
+    printf("Выбор: ");
+}
+
+
+Status read_console_line(char *buf, size_t cap, size_t *out_len){
+    if (buf == NULL || cap == 0 || out_len == NULL) return ST_ERR_ARG;
+
+    if (fgets(buf, (int)cap, stdin) == NULL) return ST_ERR_INPUT;
+    size_t len = strlen(buf);
+    while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) {
+        buf[--len] = '\0';
+    }
+    *out_len = len;
+    return ST_OK;
+}
+
+Status parse_uint_str(const char *s, unsigned int *out)
+{
+    if (s == NULL || out == NULL) return ST_ERR_ARG;
+    if (*s == '\0') return ST_ERR_INPUT;
+    unsigned long long acc = 0;
+    for (const char *p = s; *p != '\0'; ++p) {
+        if (!is_digit(*p)) return ST_ERR_INPUT;
+        acc = acc * 10ULL + (unsigned long long)(*p - '0');
+        if (acc > (unsigned long long)UINT_MAX) return ST_ERR_RANGE;
+    }
+    *out = (unsigned int)acc;
+    return ST_OK;
+}
+
+int paths_equal(const char *a, const char *b){
+    if (a == NULL || b == NULL) return 0;
+    return strcmp(a, b) == 0;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 2) {
+        fprintf(stderr, "Использование: %s <файл_со_студентами>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    Student *arr = NULL;
+    size_t n = 0;
+    Status st = read_students(argv[1], &arr, &n);
+    if (st != ST_OK) { print_status(st); free_students(arr, n); return EXIT_FAILURE; }
+
+    printf("Загружено студентов: %zu\n", n);
+
+    char line[256];
+    size_t len = 0;
+    int running = 1;
+
+    while (running) {
+        print_menu();
+        st = read_console_line(line, sizeof line, &len);
+        if (st != ST_OK) { print_status(st); break; }
+        if (len == 0) continue;
+
+        unsigned int choice = 0;
+        st = parse_uint_str(line, &choice);
+        if (st != ST_OK) {
+            printf("Неизвестный пункт меню\n");
+            continue;
+        }
+
+        switch (choice) {
+        case 0:
+            running = 0;
+            break;
+
+        case 1: {
+            printf("Введите id: ");
+            st = read_console_line(line, sizeof line, &len);
+            if (st != ST_OK) { print_status(st); break; }
+            unsigned int id = 0;
+            st = parse_uint_str(line, &id);
+            if (st != ST_OK) { print_status(st); break; }
+            search_by_id(arr, n, id);
+            break;
+        }
+
+        case 2: {
+            printf("Введите фамилию: ");
+            st = read_console_line(line, sizeof line, &len);
+            if (st != ST_OK) { print_status(st); break; }
+            search_by_surname(arr, n, line);
+            break;
+        }
+
+        case 3: {
+            printf("Введите имя: ");
+            st = read_console_line(line, sizeof line, &len);
+            if (st != ST_OK) { print_status(st); break; }
+            search_by_name(arr, n, line);
+            break;
+        }
+
+        case 4: {
+            printf("Введите группу: ");
+            st = read_console_line(line, sizeof line, &len);
+            if (st != ST_OK) { print_status(st); break; }
+            search_by_group(arr, n, line);
+            break;
+        }
+
+        case 5:
+            qsort(arr, n, sizeof(Student), cmp_by_id);
+            printf("Отсортировано по id\n");
+            break;
+
+        case 6:
+            qsort(arr, n, sizeof(Student), cmp_by_surname);
+            printf("Отсортировано по фамилии\n");
+            break;
+
+        case 7:
+            qsort(arr, n, sizeof(Student), cmp_by_name);
+            printf("Отсортировано по имени\n");
+            break;
+
+        case 8:
+            qsort(arr, n, sizeof(Student), cmp_by_group);
+            printf("Отсортировано по группе\n");
+            break;
+
+        case 9: {
+            printf("Введите id: ");
+            st = read_console_line(line, sizeof line, &len);
+            if (st != ST_OK) { print_status(st); break; }
+            unsigned int id = 0;
+            st = parse_uint_str(line, &id);
+            if (st != ST_OK) { print_status(st); break; }
+
+            printf("Введите путь к трассировочному файлу: ");
+            char path[256];
+            size_t plen = 0;
+            st = read_console_line(path, sizeof path, &plen);
+            if (st != ST_OK) { print_status(st); break; }
+
+            int same = is_same_file(argv[1], path);
+            if (same < 0) { print_status(ST_ERR_FILE_IN); break; }
+            if (same == 1) { print_status(ST_ERR_SAME_FILE); break; }
+
+            st = trace_by_id(path, arr, n, id);
+            if (st != ST_OK) { print_status(st); break; }
+            printf("Записано в %s\n", path);
+            break;
+        }
+
+        case 10: {
+            printf("Введите путь к трассировочному файлу: ");
+            char path[256];
+            size_t plen = 0;
+            st = read_console_line(path, sizeof path, &plen);
+            if (st != ST_OK) { print_status(st); break; }
+
+            int same = is_same_file(argv[1], path);
+            if (same < 0) { print_status(ST_ERR_FILE_IN); break; }
+            if (same == 1) { print_status(ST_ERR_SAME_FILE); break; }
+
+            st = trace_above_avg(path, arr, n);
+            if (st != ST_OK) { print_status(st); break; }
+            printf("Записано в %s\n", path);
+            break;
+        }
+
+        case 11:
+            for (size_t i = 0; i < n; ++i) print_student(&arr[i]);
+            break;
+
+        default:
+            printf("Неизвестный пункт меню\n");
+            break;
+        }
+    }
+    free_students(arr, n);
+    return EXIT_SUCCESS;
+}
