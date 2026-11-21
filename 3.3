@@ -1,0 +1,297 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#define EPS 1e-9
+#define ALPHABET 256
+#define MAX_CODE 256
+
+typedef enum Status {
+    OK = 0,
+    ERR_MEMORY,
+    ERR_FILE_OPEN,
+    ERR_FILE_READ,
+    ERR_INVALID_INPUT,
+    ERR_EMPTY
+} Status;
+
+typedef struct HuffNode {
+    unsigned long long freq;     
+    int byte;                   
+    struct HuffNode *left;
+    struct HuffNode *right;
+} HuffNode;
+
+typedef struct {
+    HuffNode **data;   
+    size_t size;      
+    size_t capacity;
+} MinHeap;
+
+Status heap_init(MinHeap *h, size_t capacity) {
+    if (!h) return ERR_INVALID_INPUT;
+    h->data = (HuffNode **)malloc(capacity * sizeof(HuffNode *));
+    if (!h->data) return ERR_MEMORY;
+    h->size = 0;
+    h->capacity = capacity;
+    return OK;
+}
+
+void heap_free(MinHeap *h) {
+    if (h) {
+        free(h->data);
+        h->data = NULL;
+        h->size = 0;
+        h->capacity = 0;
+    }
+}
+
+void heap_swap(HuffNode **a, HuffNode **b) {
+    HuffNode *t = *a;
+    *a = *b;
+    *b = t;
+}
+
+void heap_sift_up(MinHeap *h, size_t i) {
+    while (i > 0) {
+        size_t parent = (i - 1) / 2;
+        if (h->data[parent]->freq <= h->data[i]->freq) break;
+        heap_swap(&h->data[parent], &h->data[i]);
+        i = parent;
+    }
+}
+
+void heap_sift_down(MinHeap *h, size_t i) {
+    while(1) {
+        size_t left = 2 * i + 1;
+        size_t right = 2 * i + 2;
+        size_t smallest = i;
+        if (left < h->size && h->data[left]->freq < h->data[smallest]->freq){
+            smallest = left;
+        }
+        if (right < h->size && h->data[right]->freq < h->data[smallest]->freq){
+            smallest = right;
+        }
+        if (smallest == i) break;
+        heap_swap(&h->data[i], &h->data[smallest]);
+        i = smallest;
+    }
+}
+
+Status heap_push(MinHeap *h, HuffNode *node) {
+    if (!h || !node) return ERR_INVALID_INPUT;
+    if (h->size == h->capacity) return ERR_MEMORY;
+    h->data[h->size] = node;
+    heap_sift_up(h, h->size);
+    h->size++;
+    return OK;
+}
+
+HuffNode *heap_pop(MinHeap *h) {
+    if (!h || h->size == 0) return NULL;
+    HuffNode *top = h->data[0];
+    h->size--;
+    if (h->size > 0) {
+        h->data[0] = h->data[h->size];
+        heap_sift_down(h, 0);
+    }
+    return top;
+}
+
+HuffNode *node_create(unsigned long long freq, int byte, HuffNode *left, HuffNode *right) {
+    HuffNode *n = (HuffNode *)malloc(sizeof(HuffNode));
+    if (!n) return NULL;
+    n->freq = freq;
+    n->byte = byte;
+    n->left = left;
+    n->right = right;
+    return n;
+}
+
+void tree_free(HuffNode *root) {
+    if (!root) return;
+    tree_free(root->left);
+    tree_free(root->right);
+    free(root);
+}
+
+Status build_tree(const unsigned long long freq[ALPHABET], HuffNode **out_root) {
+    if (!freq || !out_root) return ERR_INVALID_INPUT;
+    *out_root = NULL;
+
+    size_t distinct = 0;
+    for (int i = 0; i < ALPHABET; i++){
+        if (freq[i] > 0) distinct++;
+    }
+    if (distinct == 0) return ERR_EMPTY;
+
+    MinHeap heap;
+    Status st = heap_init(&heap, distinct);
+    if (st != OK) return st;
+
+    for (int i = 0; i < ALPHABET; i++) {
+        if (freq[i] == 0) continue;
+        HuffNode *leaf = node_create(freq[i], i, NULL, NULL);
+        if (!leaf) { 
+            heap_free(&heap); 
+            return ERR_MEMORY; 
+        }
+        st = heap_push(&heap, leaf);
+        if (st != OK) { 
+            tree_free(leaf); 
+            heap_free(&heap); 
+            return st; 
+        }
+    }
+    if (distinct == 1) {
+        HuffNode *only = heap_pop(&heap);
+        heap_free(&heap);
+        *out_root = only;
+        return OK;
+    }
+    while (heap.size > 1) {
+        HuffNode *a = heap_pop(&heap);
+        HuffNode *b = heap_pop(&heap);
+        if (!a || !b) {
+            if (a) tree_free(a);
+            if (b) tree_free(b);
+            heap_free(&heap);
+            return ERR_MEMORY;
+        }
+        HuffNode *parent = node_create(a->freq + b->freq, -1, a, b);
+        if (!parent) {
+            tree_free(a);
+            tree_free(b);
+            heap_free(&heap);
+            return ERR_MEMORY;
+        }
+        st = heap_push(&heap, parent);
+        if (st != OK) {
+            tree_free(parent);
+            heap_free(&heap);
+            return st;
+        }
+    }
+    *out_root = heap_pop(&heap);
+    heap_free(&heap);
+    return OK;
+}
+
+void gen_codes_rec(HuffNode *node, char *buf, int depth, char codes[ALPHABET][MAX_CODE], int len_codes[ALPHABET]) {
+    if (!node) return;
+    if (node->byte >= 0) {
+        if (depth == 0) {
+            buf[0] = '0';
+            depth = 1;
+        }
+        buf[depth] = '\0';
+        strncpy(codes[node->byte], buf, MAX_CODE - 1);
+        codes[node->byte][MAX_CODE - 1] = '\0';
+        len_codes[node->byte] = depth;
+        return;
+    }
+    if (depth + 1 >= MAX_CODE) return; 
+    buf[depth] = '0';
+    gen_codes_rec(node->left, buf, depth + 1, codes, len_codes);
+    buf[depth] = '1';
+    gen_codes_rec(node->right, buf, depth + 1, codes, len_codes);
+}
+
+void generate_codes(HuffNode *root, char codes[ALPHABET][MAX_CODE], int len_codes[ALPHABET]) {
+    for (int i = 0; i < ALPHABET; i++) {
+        codes[i][0] = '\0';
+        len_codes[i] = 0;
+    }
+    char buf[MAX_CODE];
+    gen_codes_rec(root, buf, 0, codes, len_codes);
+}
+
+Status read_file_freq(const char *path, unsigned long long freq[ALPHABET], unsigned long long *file_size) {
+    if (!path || !freq || !file_size) return ERR_INVALID_INPUT;
+    for (int i = 0; i < ALPHABET; i++) freq[i] = 0;
+    *file_size = 0;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return ERR_FILE_OPEN;
+
+    unsigned char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t i = 0; i < n; i++) {
+            freq[buf[i]]++;
+            (*file_size)++;
+        }
+    }
+    if (ferror(f)) {
+        fclose(f);
+        return ERR_FILE_READ;
+    }
+    fclose(f);
+    return OK;
+}
+
+void print_table(const unsigned long long freq[ALPHABET], char codes[ALPHABET][MAX_CODE]) {
+    printf("%-6s %-12s %s\n", "Байт", "Частота", "Код");
+    for (int i = 0; i < ALPHABET; i++) {
+        if (freq[i] == 0) continue;
+        printf("%-6d %-12llu %s\n", i, freq[i], codes[i]);
+    }
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Использование: %s <файл>\n", argv[0]);
+        return 1;
+    }
+    unsigned long long freq[ALPHABET];
+    unsigned long long file_size = 0;
+
+    Status st = read_file_freq(argv[1], freq, &file_size);
+    if (st == ERR_FILE_OPEN) {
+        fprintf(stderr, "Ошибка: не удалось открыть файл '%s'\n", argv[1]);
+        return 1;
+    }
+    if (st != OK) {
+        fprintf(stderr, "Ошибка чтения файла)\n");
+        return 1;
+    }
+
+    if (file_size == 0) {
+        printf("Файл пуст.\n");
+        printf("Размер исходного файла: 0 байт\n");
+        printf("Размер закодированных данных: 0 бит (0 байт)\n");
+        printf("Экономия: 0.00%%\n");
+        return 0;
+    }
+
+    HuffNode *root = NULL;
+    st = build_tree(freq, &root);
+    if (st != OK) {
+        fprintf(stderr, "Ошибка построения дерева (код %d)\n", st);
+        return 1;
+    }
+    char codes[ALPHABET][MAX_CODE];
+    int len_codes[ALPHABET];
+    generate_codes(root, codes, len_codes);
+
+    print_table(freq, codes);
+
+    unsigned long long total_bits = 0;
+    for (int i = 0; i < ALPHABET; i++) {
+        if (freq[i] == 0) continue;
+        total_bits += freq[i] * (unsigned long long)len_codes[i];
+    }
+    unsigned long long total_bytes = (total_bits + 7) / 8;
+
+    double saving = 100.0 * (1.0 - (double)total_bytes / (double)file_size);
+    if (fabs(saving) < EPS){
+        saving = 0.0;
+    }
+    printf("\nРазмер исходного файла: %llu байт\n", file_size);
+    printf("Размер закодированных данных: %llu бит (%llu байт)\n", total_bits, total_bytes);
+    printf("Экономия: %.2f%%\n", saving);
+
+    tree_free(root);
+    return 0;
+}
