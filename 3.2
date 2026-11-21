@@ -1,0 +1,363 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ARG,          
+    ST_ERR_ALLOC,        
+    ST_ERR_INPUT,       
+    ST_ERR_RANGE,
+    ST_ERR_DUPLICATE           
+} Status;
+
+typedef struct {
+    unsigned int id;
+    int start;           
+    int finish;          
+} Report;
+
+void print_status(Status st){
+    switch (st) {
+    case ST_OK:
+        break;
+    case ST_ERR_ARG:
+        fprintf(stderr, "Ошибка: неверный аргумент функции\n");
+        break;
+    case ST_ERR_ALLOC:
+        fprintf(stderr, "Ошибка: не удалось выделить память\n");
+        break;
+    case ST_ERR_INPUT:
+        fprintf(stderr, "Ошибка: некорректные входные данные\n");
+        break;
+    case ST_ERR_RANGE:
+        fprintf(stderr, "Ошибка: значение вне допустимого диапазона\n");
+        break;
+    case ST_ERR_DUPLICATE: 
+        fprintf(stderr, "Ошибка: повторяющийся идентификатор доклада\n");
+        break;
+    default:
+        fprintf(stderr, "Ошибка: неизвестный статус\n");
+        break;
+    }
+}
+
+int report_compare(const void *pa, const void *pb){
+    const Report *a = (const Report *)pa;
+    const Report *b = (const Report *)pb;
+
+    if (a->finish < b->finish) return -1;
+    if (a->finish > b->finish) return  1;
+    if (a->start < b->start)  return -1;
+    if (a->start > b->start)  return  1;
+    if (a->id < b->id)     return -1;
+    if (a->id > b->id)     return  1;
+    return 0;
+}
+
+int uint_compare(const void *pa, const void *pb) {
+    unsigned int a = *(const unsigned int *)pa;
+    unsigned int b = *(const unsigned int *)pb;
+    if (a < b) return -1;
+    if (a > b) return  1;
+    return 0;
+}
+
+Status check_unique_ids(const Report *arr, size_t n) {
+    if (arr == NULL || n == 0) return ST_ERR_ARG;
+    unsigned int *ids = (unsigned int *)malloc(n * sizeof(unsigned int));
+    if (ids == NULL) return ST_ERR_ALLOC;
+    for (size_t i = 0; i < n; ++i) ids[i] = arr[i].id;
+    qsort(ids, n, sizeof(unsigned int), uint_compare);
+    Status st = ST_OK;
+    for (size_t i = 1; i < n; ++i) {
+        if (ids[i] == ids[i - 1]) { 
+            st = ST_ERR_DUPLICATE; 
+            break; 
+        }
+    }
+    free(ids);
+    return st;
+}
+
+Status max_reports(const Report *reports, size_t n, size_t k, size_t *out_max){
+    if (reports == NULL || out_max == NULL) return ST_ERR_ARG;
+    if (n == 0 || k == 0) return ST_ERR_ARG;
+
+    Report *sorted = (Report *)malloc(n * sizeof(Report));
+    if (sorted == NULL) return ST_ERR_ALLOC;
+
+    for (size_t i = 0; i < n; ++i) sorted[i] = reports[i];
+    qsort(sorted, n, sizeof(Report), report_compare);
+    int *free_at = (int *)malloc(k * sizeof(int));
+    if (free_at == NULL) {
+        free(sorted);
+        return ST_ERR_ALLOC;
+    }
+    for (size_t j = 0; j < k; ++j){
+        free_at[j] = -1;
+    }
+    size_t selected = 0;
+    for (size_t i = 0; i < n; ++i) {
+        int s = sorted[i].start;
+
+        size_t best = k;          
+        int best_free = INT_MIN;
+
+        for (size_t j = 0; j < k; ++j) {
+            int f = free_at[j];
+            if (f <= s && f > best_free) {
+                best_free = f;
+                best = j;
+            }
+        }
+        if (best != k) {
+            free_at[best] = sorted[i].finish;
+            ++selected;
+        }
+    }
+
+    free(free_at);
+    free(sorted);
+    *out_max = selected;
+    return ST_OK;
+}
+
+Status parse_time(const char *s, int *out_minutes){
+    if (s == NULL || out_minutes == NULL) return ST_ERR_ARG;
+
+    if (s[0] < '0' || s[0] > '9') return ST_ERR_INPUT;
+    if (s[1] < '0' || s[1] > '9') return ST_ERR_INPUT;
+    if (s[2] != ':') return ST_ERR_INPUT;
+    if (s[3] < '0' || s[3] > '9') return ST_ERR_INPUT;
+    if (s[4] < '0' || s[4] > '9') return ST_ERR_INPUT;
+    if (s[5] != '\0') return ST_ERR_INPUT;
+
+    int hh = (s[0] - '0') * 10 + (s[1] - '0');
+    int mm = (s[3] - '0') * 10 + (s[4] - '0');
+
+    if (hh < 0 || hh > 23) return ST_ERR_RANGE;
+    if (mm < 0 || mm > 59) return ST_ERR_RANGE;
+
+    *out_minutes = hh * 60 + mm;
+    return ST_OK;
+}
+
+
+Status read_line(FILE *f, char **line, size_t *cap, size_t *out_len, int *out_eof){
+    size_t len = 0;
+    int ch;
+    *out_eof = 0;
+
+    while (1) {
+        ch = fgetc(f);
+        if (ch == EOF) { 
+            *out_eof = 1; 
+            break; 
+        }
+        if (ch == '\n') break;
+
+        if (len + 1 >= *cap) {
+            size_t new_cap = (*cap == 0) ? 128 : *cap * 2;
+            char *tmp = (char *)realloc(*line, new_cap);
+            if (tmp == NULL) return ST_ERR_ALLOC;
+            *line = tmp;
+            *cap = new_cap;
+        }
+        (*line)[len++] = (char)ch;
+    }
+    (*line)[len] = '\0';
+    *out_len = len;
+    return ST_OK;
+}
+
+Status parse_report_line(const char *line, Report *out){
+    if (line == NULL || out == NULL) return ST_ERR_ARG;
+
+    const char *p = line;
+
+    if (*p < '0' || *p > '9') return ST_ERR_INPUT;
+    unsigned long long id_acc = 0;
+    while (*p >= '0' && *p <= '9') {
+        id_acc = id_acc * 10ULL + (unsigned long long)(*p - '0');
+        if (id_acc > (unsigned long long)UINT_MAX) return ST_ERR_RANGE;
+        ++p;
+    }
+    if (id_acc == 0ULL) return ST_ERR_RANGE;   
+
+    while (*p == ' ' || *p == '\t') ++p;
+
+    char tbuf[6];
+    for (int i = 0; i < 5; ++i) {
+        if (p[i] == '\0') return ST_ERR_INPUT;
+        tbuf[i] = p[i];
+    }
+    tbuf[5] = '\0';
+    int start = 0;
+    Status st = parse_time(tbuf, &start);
+    if (st != ST_OK) return st;
+    p += 5;
+
+    while (*p == ' ' || *p == '\t') ++p;
+
+    for (int i = 0; i < 5; ++i) {
+        if (p[i] == '\0') return ST_ERR_INPUT;
+        tbuf[i] = p[i];
+    }
+    tbuf[5] = '\0';
+    int finish = 0;
+    st = parse_time(tbuf, &finish);
+    if (st != ST_OK) return st;
+    p += 5;
+
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p != '\0') return ST_ERR_INPUT;  
+
+    if (start >= finish) return ST_ERR_RANGE; 
+
+    out->id = (unsigned int)id_acc;
+    out->start = start;
+    out->finish = finish;
+    return ST_OK;
+}
+
+Status read_input(FILE *f, Report **out_arr, size_t *out_n, size_t *out_k){
+    if (f == NULL || out_arr == NULL || out_n == NULL || out_k == NULL)
+        return ST_ERR_ARG;
+
+    char  *line = NULL;
+    size_t cap  = 0;
+    size_t len  = 0;
+    int    eof  = 0;
+    Status st;
+
+    st = read_line(f, &line, &cap, &len, &eof);
+    if (st != ST_OK) { 
+        free(line); 
+        return st; 
+    }
+    if (eof && len == 0) { 
+        free(line); 
+        return ST_ERR_INPUT; 
+    }
+
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') ++p;
+
+    unsigned long long n_acc = 0;
+    if (*p < '0' || *p > '9') { 
+        free(line); 
+        return ST_ERR_INPUT; 
+    }
+    while (*p >= '0' && *p <= '9') {
+        n_acc = n_acc * 10ULL + (unsigned long long)(*p - '0');
+        if (n_acc > (unsigned long long)SIZE_MAX / sizeof(Report)) {
+            free(line); return ST_ERR_RANGE;
+        }
+        ++p;
+    }
+    if (n_acc == 0ULL) { 
+        free(line); 
+        return ST_ERR_RANGE; 
+    }
+
+    while (*p == ' ' || *p == '\t') ++p;
+
+    unsigned long long k_acc = 0;
+    if (*p < '0' || *p > '9') { 
+        free(line); 
+        return ST_ERR_INPUT; 
+    }
+    while (*p >= '0' && *p <= '9') {
+        k_acc = k_acc * 10ULL + (unsigned long long)(*p - '0');
+        if (k_acc > (unsigned long long)SIZE_MAX) {
+            free(line); return ST_ERR_RANGE;
+        }
+        ++p;
+    }
+    if (k_acc == 0ULL) { 
+        free(line); 
+        return ST_ERR_RANGE; 
+    }
+
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p != '\0') { 
+        free(line); 
+        return ST_ERR_INPUT; 
+    }
+
+    size_t n = (size_t)n_acc;
+    size_t k = (size_t)k_acc;
+
+    Report *arr = (Report *)malloc(n * sizeof(Report));
+    if (arr == NULL) { free(line); return ST_ERR_ALLOC; }
+
+    size_t got = 0;
+    while (got < n) {
+        st = read_line(f, &line, &cap, &len, &eof);
+        if (st != ST_OK) { 
+            free(arr); 
+            free(line); 
+            return st; 
+        }
+
+        if (len == 0) {
+            if (eof) { 
+                free(arr); 
+                free(line); 
+                return ST_ERR_INPUT; 
+            }
+            continue;
+        }
+        st = parse_report_line(line, &arr[got]);
+        if (st != ST_OK) { 
+            free(arr); 
+            free(line); 
+            return st; 
+        }
+        ++got;
+
+        if (eof && got < n) { 
+            free(arr); 
+            free(line); 
+            return ST_ERR_INPUT; 
+        }
+    }
+    st = check_unique_ids(arr, n);
+    if (st != ST_OK) { 
+        free(arr); 
+        free(line); 
+        return st; 
+    }
+
+    free(line);
+    *out_arr = arr;
+    *out_n   = n;
+    *out_k   = k;
+    return ST_OK;
+}
+
+int main(void){
+    Report  *reports = NULL;
+    size_t n = 0, k = 0;
+
+    Status st = read_input(stdin, &reports, &n, &k);
+    if (st != ST_OK) { 
+        print_status(st); 
+        free(reports); 
+        return EXIT_FAILURE; 
+    }
+
+    size_t result = 0;
+    st = max_reports(reports, n, k, &result);
+    if (st != ST_OK) { 
+        print_status(st); 
+        free(reports); 
+        return EXIT_FAILURE; 
+    }
+
+    printf("Количество докладов: %zu\n", result);
+
+    free(reports);
+    return EXIT_SUCCESS;
+}
