@@ -1,0 +1,107 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+typedef enum {
+    ST_OK = 0,
+    ST_ERR_ARG,          
+    ST_ERR_INPUT,       
+    ST_ERR_ALLOC         
+} Status;
+
+const char DIGITS[] = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+#define MAX_DIGITS_U32 33u
+
+void reverse_str(char *s, size_t n){
+    char *f = s;
+    char *l = s;
+    size_t i = 0u;
+    while (i < n) { 
+        ++l; 
+        ++i; 
+    }
+    --l;
+    while (f < l) {
+        char t = *f; 
+        *f = *l; 
+        *l = t;
+        ++f;
+        --l;
+    }
+}
+
+Status to_base_2r(uint32_t value, unsigned r, char *out, size_t out_size, size_t *out_len){
+    if (out == NULL || out_len == NULL){
+        return ST_ERR_ARG;
+    } 
+    if (r < 1u || r > 5u){
+        return ST_ERR_ARG;
+    }         
+    if (out_size == 0u){
+        return ST_ERR_ARG;
+    }                 
+
+    const uint32_t mask = ~(~0u << r);
+    char tmp[MAX_DIGITS_U32];
+    size_t n = 0u;
+    uint32_t v = value;
+
+    do {
+        tmp[n] = DIGITS[v & mask];
+        ++n;
+        v >>= r;
+    } while (v != 0u);
+    reverse_str(tmp, n);
+    tmp[n] = '\0';
+
+    if (n + 1u > out_size) return ST_ERR_INPUT;
+    memcpy(out, tmp, n + 1u);
+    *out_len = n;
+    return ST_OK;
+}
+
+void print_status(Status st){
+    switch (st) {
+    case ST_OK:
+        break;
+    case ST_ERR_ARG:
+        fprintf(stderr, "Неверный аргумент функции(r = 1,....,5)\n");
+        break;
+    case ST_ERR_INPUT:
+        fprintf(stderr, "Неверные входные данные\n");
+        break;
+    case ST_ERR_ALLOC:
+        fprintf(stderr, "Ошибка памяти\n");
+        break;
+    default:
+        fprintf(stderr, "Неизвестный статус\n");
+        break;
+    }
+}
+
+void demo(uint32_t value, unsigned r){
+    char buf[40];
+    size_t len = 0u;
+
+    Status st = to_base_2r(value, r, buf, sizeof buf, &len);
+    if (st != ST_OK) { 
+        print_status(st); 
+        return; 
+    }
+
+    printf("value=%u r=%u (base %-2u): %s\n", value, r, (1u << r), buf);
+}
+
+int main(void){
+    demo(0u, 1u);
+    demo(255u, 1u);
+    demo(255u, 2u);
+    demo(255u, 3u);
+    demo(255u, 4u);
+    demo(255u, 5u);
+    demo(1000000u, 2u);
+    demo(4294967295u, 5u);
+    demo(10u, 6u);   
+    return EXIT_SUCCESS;
+}
