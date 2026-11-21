@@ -1,0 +1,465 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <time.h>
+
+#define MAX_TOKEN 128
+#define MAX_LINE  512
+
+typedef enum Status {
+    OK = 0,
+    ERR_MEMORY,
+    ERR_FILE_OPEN,
+    ERR_FILE_READ,
+    ERR_INVALID_INPUT,
+    ERR_NOT_FOUND,
+    ERR_EMPTY,
+    ERR_DUPLICATE,
+    ERR_INVALID_DATE
+} Status;
+
+typedef struct {
+    int day, month, year;
+    int hour, minute, second;
+} TimeStamp;
+
+typedef enum {
+    STOP_INTERMEDIATE = 0,
+    STOP_START,
+    STOP_END
+} StopKind;
+
+typedef struct Stop {
+    char vehicle[MAX_TOKEN];   
+    TimeStamp arrive;          
+    TimeStamp depart;          
+    StopKind kind;             
+    char station[MAX_TOKEN];   
+    struct Stop *next;
+} Stop;
+
+typedef struct Vehicle {
+    char id[MAX_TOKEN];        
+    Stop *stops;               
+    int stop_count;           
+    struct Vehicle *next;
+} Vehicle;
+
+typedef struct {
+    Vehicle *head;
+    int vehicle_count;
+} AppContext;
+
+int is_leap(int y) {
+    return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0);
+}
+
+int days_in_month(int m, int y) {
+    const int d[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (m < 1 || m > 12) return 0;
+    if (m == 2 && is_leap(y)) return 29;
+    return d[m - 1];
+}
+
+Status validate_timestamp(const TimeStamp *t) {
+    if (!t) return ERR_INVALID_INPUT;
+    if (t->year < 1900 || t->year > 2100) return ERR_INVALID_DATE;
+    if (t->month < 1 || t->month > 12) return ERR_INVALID_DATE;
+    if (t->day < 1 || t->day > days_in_month(t->month, t->year)) return ERR_INVALID_DATE;
+    if (t->hour < 0 || t->hour > 23) return ERR_INVALID_DATE;
+    if (t->minute < 0 || t->minute > 59) return ERR_INVALID_DATE;
+    if (t->second < 0 || t->second > 59) return ERR_INVALID_DATE;
+    return OK;
+}
+
+long long ts_to_seconds(const TimeStamp *t) {
+   
+    return (long long)t->year * 10000000000LL
+         + (long long)t->month * 100000000LL
+         + (long long)t->day * 1000000LL
+         + (long long)t->hour * 10000LL
+         + (long long)t->minute * 100LL
+         + (long long)t->second;
+}
+
+int compare_ts(const TimeStamp *a, const TimeStamp *b) {
+    long long sa = ts_to_seconds(a);
+    long long sb = ts_to_seconds(b);
+    if (sa < sb) return -1;
+    if (sa > sb) return 1;
+    return 0;
+}
+
+Status parse_timestamp(const char *s, TimeStamp *out) {
+    if (!s || !out) return ERR_INVALID_INPUT;
+    int d, m, y, hh, mm, ss;
+    if (sscanf(s, "%d.%d.%d %d:%d:%d", &d, &m, &y, &hh, &mm, &ss) != 6)
+        return ERR_INVALID_DATE;
+    out->day = d; out->month = m; out->year = y;
+    out->hour = hh; out->minute = mm; out->second = ss;
+    return validate_timestamp(out);
+}
+
+Status parse_kind(const char *s, StopKind *out) {
+    if (!s || !out) return ERR_INVALID_INPUT;
+    if (strcmp(s, "start") == 0 || strcmp(s, "S") == 0 || strcmp(s, "начальная") == 0) {
+        *out = STOP_START; return OK;
+    }
+    if (strcmp(s, "end") == 0 || strcmp(s, "E") == 0 || strcmp(s, "конечная") == 0) {
+        *out = STOP_END; return OK;
+    }
+    if (strcmp(s, "mid") == 0 || strcmp(s, "M") == 0 || strcmp(s, "промежуточная") == 0) {
+        *out = STOP_INTERMEDIATE; return OK;
+    }
+    return ERR_INVALID_INPUT;
+}
+
+Stop *stop_create(const char *vehicle, const TimeStamp *arr, const TimeStamp *dep, StopKind kind, const char *station) {
+    Stop *s = (Stop *)malloc(sizeof(Stop));
+    if (!s) return NULL;
+    strncpy(s->vehicle, vehicle, MAX_TOKEN - 1); s->vehicle[MAX_TOKEN - 1] = 0;
+    s->arrive = *arr;
+    s->depart = *dep;
+    s->kind = kind;
+    strncpy(s->station, station, MAX_TOKEN - 1); s->station[MAX_TOKEN - 1] = 0;
+    s->next = NULL;
+    return s;
+}
+
+void stops_free(Stop *head) {
+    while (head) { Stop *n = head->next; free(head); head = n; }
+}
+
+Status stops_insert_sorted(Stop **head, Stop *item) {
+    if (!head || !item) return ERR_INVALID_INPUT;
+    item->next = NULL;
+    if (!*head || compare_ts(&item->arrive, &(*head)->arrive) < 0) {
+        item->next = *head;
+        *head = item;
+        return OK;
+    }
+    Stop *cur = *head;
+    while (cur->next && compare_ts(&item->arrive, &cur->next->arrive) >= 0)
+        cur = cur->next;
+    item->next = cur->next;
+    cur->next = item;
+    return OK;
+}
+
+Stop *stops_find_dup(Stop *head, const Stop *key) {
+    Stop *cur = head;
+    while (cur) {
+        if (strcmp(cur->vehicle, key->vehicle) == 0 &&
+            compare_ts(&cur->arrive, &key->arrive) == 0 &&
+            compare_ts(&cur->depart, &key->depart) == 0 &&
+            cur->kind == key->kind &&
+            strcmp(cur->station, key->station) == 0)
+            return cur;
+        cur = cur->next;
+    }
+    return NULL;
+}
+
+Vehicle *vehicle_create(const char *id) {
+    Vehicle *v = (Vehicle *)malloc(sizeof(Vehicle));
+    if (!v) return NULL;
+    strncpy(v->id, id, MAX_TOKEN - 1); v->id[MAX_TOKEN - 1] = 0;
+    v->stops = NULL;
+    v->stop_count = 0;
+    v->next = NULL;
+    return v;
+}
+
+void vehicles_free(Vehicle *head) {
+    while (head) {
+        Vehicle *n = head->next;
+        stops_free(head->stops);
+        free(head);
+        head = n;
+    }
+}
+
+Vehicle *vehicles_find(Vehicle *head, const char *id) {
+    Vehicle *cur = head;
+    while (cur) {
+        if (strcmp(cur->id, id) == 0) return cur;
+        cur = cur->next;
+    }
+    return NULL;
+}
+
+Status vehicles_get_or_create(Vehicle **head, const char *id, Vehicle **out) {
+    if (!head || !id || !out) return ERR_INVALID_INPUT;
+    Vehicle *v = vehicles_find(*head, id);
+    if (v) { *out = v; return OK; }
+    v = vehicle_create(id);
+    if (!v) return ERR_MEMORY;
+    v->next = *head;
+    *head = v;
+    *out = v;
+    return OK;
+}
+
+Status read_line(FILE *f, char *buf, size_t sz) {
+    if (!fgets(buf, (int)sz, f)) return ERR_FILE_READ;
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = '\0';
+    return OK;
+}
+
+Status parse_stop_line(const char *line, Stop **out) {
+    if (!line || !out) return ERR_INVALID_INPUT;
+    char vehicle[MAX_TOKEN], arr_str[MAX_TOKEN], dep_str[MAX_TOKEN];
+    char kind_str[MAX_TOKEN], station[MAX_TOKEN];
+
+    int n = sscanf(line, "%127[^|]|%127[^|]|%127[^|]|%127[^|]|%127[^\n]",
+                   vehicle, arr_str, dep_str, kind_str, station);
+    if (n != 5) return ERR_FILE_READ;
+
+    char *fields[5] = { vehicle, arr_str, dep_str, kind_str, station };
+    for (int i = 0; i < 5; i++) {
+        char *p = fields[i];
+        while (*p && isspace((unsigned char)*p)) p++;
+        char *q = p + strlen(p);
+        while (q > p && isspace((unsigned char)q[-1])) *--q = '\0';
+        memmove(fields[i], p, strlen(p) + 1);
+    }
+
+    if (vehicle[0] == '\0' || station[0] == '\0') return ERR_INVALID_INPUT;
+
+    TimeStamp arr, dep;
+    Status st = parse_timestamp(arr_str, &arr);
+    if (st != OK) return st;
+    st = parse_timestamp(dep_str, &dep);
+    if (st != OK) return st;
+    if (compare_ts(&arr, &dep) > 0) return ERR_INVALID_DATE;
+
+    StopKind kind;
+    st = parse_kind(kind_str, &kind);
+    if (st != OK) return st;
+
+    Stop *s = stop_create(vehicle, &arr, &dep, kind, station);
+    if (!s) return ERR_MEMORY;
+    *out = s;
+    return OK;
+}
+
+Status load_file(AppContext *ctx, const char *path) {
+    if (!ctx || !path) return ERR_INVALID_INPUT;
+    FILE *f = fopen(path, "r");
+    if (!f) return ERR_FILE_OPEN;
+    char line[MAX_LINE];
+    Status st = OK;
+    while (read_line(f, line, sizeof(line)) == OK) {
+        if (line[0] == '\0' || line[0] == '#') continue;
+        Stop *s = NULL;
+        st = parse_stop_line(line, &s);
+        if (st != OK) break;
+
+        Vehicle *v = NULL;
+        st = vehicles_get_or_create(&ctx->head, s->vehicle, &v);
+        if (st != OK) { stops_free(s); break; }
+        if (v->stop_count == 0) ctx->vehicle_count++;
+
+        if (stops_find_dup(v->stops, s)) {
+            free(s);
+            continue; 
+        }
+        Status ist = stops_insert_sorted(&v->stops, s);
+        if (ist != OK) { free(s); st = ist; break; }
+        v->stop_count++;
+    }
+    fclose(f);
+    return st;
+}
+
+long long stop_duration(const Stop *s) {
+    if (!s) return 0;
+    return ts_to_seconds(&s->depart) - ts_to_seconds(&s->arrive);
+}
+
+long long route_duration(const Vehicle *v) {
+    if (!v || !v->stops) return 0;
+    Stop *first = v->stops;
+    Stop *last = first;
+    while (last->next) last = last->next;
+    return ts_to_seconds(&last->arrive) - ts_to_seconds(&first->arrive);
+}
+
+int route_count(const Vehicle *v) {
+    if (!v) return 0;
+    int cnt = 0;
+    for (Stop *s = v->stops; s; s = s->next)
+        if (s->kind == STOP_START) cnt++;
+    if (cnt == 0 && v->stop_count > 0) cnt = 1;
+    return cnt;
+}
+
+long long total_idle(const Vehicle *v) {
+    if (!v) return 0;
+    long long sum = 0;
+    for (Stop *s = v->stops; s; s = s->next)
+        sum += stop_duration(s);
+    return sum;
+}
+
+long long max_stop_duration(const Vehicle *v) {
+    if (!v) return 0;
+    long long m = 0;
+    for (Stop *s = v->stops; s; s = s->next) {
+        long long d = stop_duration(s);
+        if (d > m) m = d;
+    }
+    return m;
+}
+
+long long min_stop_duration(const Vehicle *v, int *has) {
+    long long m = 0;
+    *has = 0;
+    if (!v) return 0;
+    for (Stop *s = v->stops; s; s = s->next) {
+        long long d = stop_duration(s);
+        if (!*has || d < m) { m = d; *has = 1; }
+    }
+    return m;
+}
+
+typedef long long (*MetricFn)(const Vehicle *);
+
+Vehicle *find_extreme(Vehicle *head, MetricFn metric, int cmp_max) {
+    if (!head) return NULL;
+    Vehicle *best = head;
+    long long best_val = metric(head);
+    for (Vehicle *v = head->next; v; v = v->next) {
+        long long val = metric(v);
+        if (cmp_max ? (val > best_val) : (val < best_val)) {
+            best = v; best_val = val;
+        }
+    }
+    return best;
+}
+
+long long m_routes(const Vehicle *v) { return route_count(v); }
+long long m_route_duration(const Vehicle *v) { return route_duration(v); }
+long long m_total_idle(const Vehicle *v) { return total_idle(v); }
+long long m_max_stop(const Vehicle *v) { return max_stop_duration(v); }
+
+Vehicle *find_min_stop(Vehicle *head) {
+    Vehicle *best = NULL;
+    long long best_val = 0;
+    for (Vehicle *v = head; v; v = v->next) {
+        int has;
+        long long val = min_stop_duration(v, &has);
+        if (!has) continue;
+        if (!best || val < best_val) { best = v; best_val = val; }
+    }
+    return best;
+}
+
+void print_vehicle(const Vehicle *v) {
+    if (!v) { printf("[не найдено]\n"); return; }
+    printf("ТС: %s\n", v->id);
+    printf("  Остановок: %d, маршрутов: %d\n", v->stop_count, route_count(v));
+    printf("  Длительность маршрута: %lld сек\n", route_duration(v));
+    printf("  Суммарный простой: %lld сек\n", total_idle(v));
+    printf("  Макс. остановка: %lld сек\n", max_stop_duration(v));
+    int has;
+    long long mn = min_stop_duration(v, &has);
+    if (has) printf("  Мин. остановка: %lld сек\n", mn);
+    printf("  Остановки:\n");
+    for (const Stop *s = v->stops; s; s = s->next) {
+        const char *k = s->kind == STOP_START ? "начальная"
+                       : s->kind == STOP_END ? "конечная" : "промежуточная";
+        printf("    %02d.%02d.%04d %02d:%02d:%02d -> %02d.%02d.%04d %02d:%02d:%02d | %s | %s\n",
+               s->arrive.day, s->arrive.month, s->arrive.year,
+               s->arrive.hour, s->arrive.minute, s->arrive.second,
+               s->depart.day, s->depart.month, s->depart.year,
+               s->depart.hour, s->depart.minute, s->depart.second,
+               k, s->station);
+    }
+}
+
+void print_all(const AppContext *ctx) {
+    if (!ctx->head) { printf("[Список пуст]\n"); return; }
+    for (const Vehicle *v = ctx->head; v; v = v->next)
+        print_vehicle(v);
+}
+
+void print_menu(void) {
+    printf("\n===== МЕНЮ =====\n");
+    printf("1. Показать все ТС\n");
+    printf("2. Поиск ТС по номеру\n");
+    printf("3. Больше всех маршрутов\n");
+    printf("4. Меньше всех маршрутов\n");
+    printf("5. Самый длинный путь\n");
+    printf("6. Самый короткий путь\n");
+    printf("7. Самый длинный маршрут (по времени)\n");
+    printf("8. Самый короткий маршрут (по времени)\n");
+    printf("9. Самая долгая остановка\n");
+    printf("10. Самая короткая остановка\n");
+    printf("11. Наибольшее время простоя\n");
+    printf("12. Наименьшее время простоя\n");
+    printf("0. Выход\n");
+    printf("Выбор: ");
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Использование: %s <файл1> [<файл2> ...]\n", argv[0]);
+        return 1;
+    }
+
+    AppContext ctx = { NULL, 0 };
+    for (int i = 1; i < argc; i++) {
+        Status st = load_file(&ctx, argv[i]);
+        if (st != OK) {
+            fprintf(stderr, "Ошибка загрузки '%s' (код %d)\n", argv[i], st);
+            vehicles_free(ctx.head);
+            return 1;
+        }
+    }
+    printf("Загружено ТС: %d\n", ctx.vehicle_count);
+
+    int running = 1;
+    while (running) {
+        print_menu();
+        int choice;
+        if (scanf("%d", &choice) != 1) {
+            int c; while ((c = getchar()) != '\n' && c != EOF) {}
+            printf("Некорректный выбор\n");
+            continue;
+        }
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+
+        switch (choice) {
+            case 1: print_all(&ctx); break;
+            case 2: {
+                char id[MAX_TOKEN];
+                printf("Номер ТС: ");
+                if (!fgets(id, sizeof(id), stdin)) break;
+                size_t n = strlen(id);
+                while (n > 0 && (id[n-1] == '\n' || id[n-1] == '\r')) id[--n] = '\0';
+                Vehicle *v = vehicles_find(ctx.head, id);
+                if (v) print_vehicle(v);
+                else printf("Не найдено\n");
+                break;
+            }
+            case 3: print_vehicle(find_extreme(ctx.head, m_routes, 1)); break;
+            case 4: print_vehicle(find_extreme(ctx.head, m_routes, 0)); break;
+            case 5: print_vehicle(find_extreme(ctx.head, m_route_duration, 1)); break;
+            case 6: print_vehicle(find_extreme(ctx.head, m_route_duration, 0)); break;
+            case 7: print_vehicle(find_extreme(ctx.head, m_route_duration, 1)); break;
+            case 8: print_vehicle(find_extreme(ctx.head, m_route_duration, 0)); break;
+            case 9: print_vehicle(find_extreme(ctx.head, m_max_stop, 1)); break;
+            case 10: print_vehicle(find_min_stop(ctx.head)); break;
+            case 11: print_vehicle(find_extreme(ctx.head, m_total_idle, 1)); break;
+            case 12: print_vehicle(find_extreme(ctx.head, m_total_idle, 0)); break;
+            case 0: running = 0; break;
+            default: printf("Неверный выбор\n");
+        }
+    }
+
+    vehicles_free(ctx.head);
+    return 0;
+}
