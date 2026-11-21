@@ -1,0 +1,620 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <float.h>
+#include <math.h>
+#include <sys/stat.h>
+#include <limits.h>
+
+#define MAX_NAME 128
+#define MAX_FILE 512
+#define EPS 1e-9
+
+typedef enum Status {
+    OK = 0,
+    ERR_MEMORY,
+    ERR_FILE_OPEN,
+    ERR_FILE_READ,
+    ERR_FILE_WRITE,
+    ERR_INVALID_INPUT,
+    ERR_NOT_FOUND,
+    ERR_EMPTY_LIST,
+    ERR_DUPLICATE,
+    ERR_UNDO_EMPTY,
+    ERR_INVALID_DATE,
+    ERR_INVALID_SALARY
+} Status;
+
+typedef struct Date {
+    int day;
+    int month;
+    int year;
+} Date;
+
+typedef struct Liver {
+    char surname[MAX_NAME];
+    char name[MAX_NAME];
+    char patronymic[MAX_NAME];
+    Date birth;
+    char gender;
+    double salary;
+    struct Liver *next;
+} Liver;
+
+typedef enum ModType {
+    MOD_ADD,
+    MOD_DELETE,
+    MOD_UPDATE
+} ModType;
+
+typedef struct Modification {
+    ModType type;
+    Liver *data;
+    int position;
+    Liver *old_data;
+    struct Modification *next;
+} Modification;
+
+typedef struct AppContext {
+    Liver *head;
+    int count;
+    Modification *undo_stack;
+    int mod_count;
+} AppContext;
+
+int is_leap(int x) {
+    return ((x % 4 == 0 && x % 100 != 0) || (x % 400 == 0));
+}
+
+int months_day(int month, int year) {
+    const int days[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (month < 1 || month > 12) return 0;
+    if (month == 2 && is_leap(year)) return 29;
+    return days[month - 1];
+}
+
+Status valid_date(int day, int month, int year) {
+    if (year > 2026) return ERR_INVALID_DATE;
+    if (month < 1 || month > 12) return ERR_INVALID_DATE;
+    if (day < 1 || day > months_day(month, year)) return ERR_INVALID_DATE;
+    return OK;
+}
+
+Status validate_name(const char *s, int allow_empty) {
+    if (!s) return ERR_INVALID_INPUT;
+    size_t len = strlen(s);
+    if (len == 0) return allow_empty ? OK : ERR_INVALID_INPUT;
+    if (len >= MAX_NAME) return ERR_INVALID_INPUT;
+    for (size_t i = 0; i < len; ++i) {
+        if (!isalpha((unsigned char)s[i])) return ERR_INVALID_INPUT;
+    }
+    return OK;
+}
+
+Status validate_salary(double salary) {
+    if (!isfinite(salary)) return ERR_INVALID_SALARY;
+    if (salary < -EPS) return ERR_INVALID_SALARY;
+    return OK;
+}
+
+int birth_date(const Date *d) {
+    return d->year * 10000 + d->month * 100 + d->day;
+}
+
+int compare_age(const Liver *a, const Liver *b) {
+    int da = birth_date(&a->birth);
+    int db = birth_date(&b->birth);
+    return da - db;
+}
+
+void free_liver(Liver *l) {
+    if (l) {
+        free(l);
+    }
+}
+
+Liver *copy_liver(const Liver *l) {
+    if (!l) return NULL;
+    Liver *nl = (Liver *)malloc(sizeof(Liver));
+    if (!nl) return NULL;
+    *nl = *l;
+    nl->next = NULL;
+    return nl;
+}
+
+void free_list(Liver *head) {
+    while (head) {
+        Liver *n = head->next;
+        free(head);
+        head = n;
+    }
+}
+ 
+Status insert(Liver **head, Liver *item) {
+    if (!head || !item) return ERR_INVALID_INPUT;
+    item->next = NULL;
+    if (!*head || compare_age(item, *head) < 0) {
+        item->next = *head;
+        *head = item;
+        return OK;
+    }
+    Liver *cur = *head;
+    while (cur->next && compare_age(item, cur->next) >= 0) {
+        cur = cur->next;
+    }
+    item->next = cur->next;
+    cur->next = item;
+    return OK;
+}
+
+Liver *find_liver(const Liver *head, const Liver *key) {
+    const Liver *cur = head;
+    while (cur) {
+        if (strcmp(cur->surname, key->surname) == 0 &&
+            strcmp(cur->name, key->name) == 0 &&
+            strcmp(cur->patronymic, key->patronymic) == 0 &&
+            cur->birth.day == key->birth.day &&
+            cur->birth.month == key->birth.month &&
+            cur->birth.year == key->birth.year) {
+            return (Liver *)cur;
+        }
+        cur = cur->next;
+    }
+    return NULL;
+}
+
+Liver *find_prev(Liver *head, Liver *target) {
+    if (!head || !target || head == target) return NULL;
+    Liver *cur = head;
+    while (cur && cur->next != target) cur = cur->next;
+    return cur;
+}
+
+Status delete_liver(Liver **head, Liver *target) {
+    if (!head || !*head || !target) return ERR_NOT_FOUND;
+    Liver *prev = find_prev(*head, target);
+    if (!prev) {
+        if (*head != target) return ERR_NOT_FOUND;
+        *head = target->next;
+    } else {
+        prev->next = target->next;
+    }
+    target->next = NULL;
+    return OK;
+}
+
+void push_mod(Modification **stack, ModType t, Liver *data, int pos, Liver *old) {
+    if (!stack) return;
+    Modification *m = (Modification *)malloc(sizeof(Modification));
+    if (!m) {
+        if (data) free_liver(data);
+        if (old) free_liver(old);
+        return;
+    }
+    m->type = t;
+    m->data = data;
+    m->position = pos;
+    m->old_data = old;
+    m->next = *stack;
+    *stack = m;
+}
+
+void clear_undo(Modification **stack) {
+    while (*stack) {
+        Modification *n = (*stack)->next;
+        if ((*stack)->data) free_liver((*stack)->data);
+        if ((*stack)->old_data) free_liver((*stack)->old_data);
+        free(*stack);
+        *stack = n;
+    }
+}
+
+Status do_undo(AppContext *ctx) {
+    if (!ctx) return ERR_INVALID_INPUT;
+    int limit = ctx->mod_count / 2;
+    if (limit <= 0) return ERR_UNDO_EMPTY;
+    int done = 0;
+    while (done < limit && ctx->undo_stack) {
+        Modification *m = ctx->undo_stack;
+        ctx->undo_stack = m->next;
+        switch (m->type) {
+            case MOD_ADD: {
+                Liver *cur = find_liver(ctx->head, m->data);
+                if (cur) {
+                    delete_liver(&ctx->head, cur);
+                    ctx->count--;
+                }
+                free_liver(m->data);
+                break;
+            }
+            case MOD_DELETE: {
+                Liver *cp = copy_liver(m->data);
+                if (cp) {
+                    insert(&ctx->head, cp);
+                    ctx->count++;
+                }
+                free_liver(m->data);
+                break;
+            }
+            case MOD_UPDATE: {
+                Liver *cur = find_liver(ctx->head, m->data);
+                if (cur && m->old_data) {
+                    Liver *cp = copy_liver(m->old_data);
+                    delete_liver(&ctx->head, cur);
+                    free_liver(cur);
+                    if (cp) {
+                        insert(&ctx->head, cp);
+                    }
+                }
+                if (m->data) free_liver(m->data);
+                if (m->old_data) free_liver(m->old_data);
+                break;
+            }
+        }
+        free(m);
+        done++;
+    }
+    ctx->mod_count -= limit;
+    return OK;
+}
+
+Status read_line(FILE *f, char *buf, size_t sz) {
+    if (!fgets(buf, (int)sz, f)) return ERR_FILE_READ;
+    size_t n = strlen(buf);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+        buf[--n] = '\0';
+    }
+    return OK;
+}
+
+Status parse_liver_line(const char *line, Liver *out) {
+    char sur[MAX_NAME], nam[MAX_NAME], pat[MAX_NAME], gen;
+    int d, m, y;
+    double inc;
+    int scanned = sscanf(line, "%127s %127s %127s %d %d %d %c %lf",
+                         sur, nam, pat, &d, &m, &y, &gen, &inc);
+    if (scanned != 8) return ERR_FILE_READ;
+    if (strcmp(pat, "-") == 0) pat[0] = '\0';
+    if (validate_name(sur, 0) != OK) return ERR_INVALID_INPUT;
+    if (validate_name(nam, 0) != OK) return ERR_INVALID_INPUT;
+    if (validate_name(pat, 1) != OK) return ERR_INVALID_INPUT;
+    if (valid_date(d, m, y) != OK) return ERR_INVALID_DATE;
+    if (gen != 'M' && gen != 'W') return ERR_INVALID_INPUT;
+    if (validate_salary(inc) != OK) return ERR_INVALID_SALARY;
+
+    strncpy(out->surname, sur, MAX_NAME - 1); out->surname[MAX_NAME - 1] = 0;
+    strncpy(out->name, nam, MAX_NAME - 1);    out->name[MAX_NAME - 1] = 0;
+    strncpy(out->patronymic, pat, MAX_NAME - 1); out->patronymic[MAX_NAME - 1] = 0;
+    out->birth.day = d; out->birth.month = m; out->birth.year = y;
+    out->gender = gen;
+    out->salary = inc;
+    out->next = NULL;
+    return OK;
+}
+
+Status load_from_file(AppContext *ctx, const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return ERR_FILE_OPEN;
+    char line[1024];
+    Status st = OK;
+    while (read_line(f, line, sizeof(line)) == OK) {
+        if (line[0] == '\0') continue;
+        Liver tmp;
+        st = parse_liver_line(line, &tmp);
+        if (st != OK) break;
+        Liver *copy = copy_liver(&tmp);
+        if (!copy) { st = ERR_MEMORY; break; }
+        Status ist = insert(&ctx->head, copy);
+        if (ist != OK) { free_liver(copy); st = ist; break; }
+        ctx->count++;
+    }
+    fclose(f);
+    return st;
+}
+
+int is_same_file(const char *path1, const char *path2) {
+    struct stat st1, st2;
+    if (stat(path1, &st1) != 0) return -1;
+    if (stat(path2, &st2) != 0) return 0;
+    return (st1.st_dev == st2.st_dev && st1.st_ino == st2.st_ino) ? 1 : 0;
+}
+
+Status save_to_file(const Liver *head, const char *path, const char *input_path) {
+    int same = is_same_file(input_path, path);
+    if (same < 0) return ERR_FILE_OPEN;
+    if (same == 1) return ERR_INVALID_INPUT;
+
+    FILE *f = fopen(path, "w");
+    if (!f) return ERR_FILE_OPEN;
+    const Liver *cur = head;
+    while (cur) {
+        const char *pat = cur->patronymic[0] ? cur->patronymic : "-";
+        if (fprintf(f, "%s %s %s %d %d %d %c %.2f\n",
+                    cur->surname, cur->name, pat,
+                    cur->birth.day, cur->birth.month, cur->birth.year,
+                    cur->gender, cur->salary) < 0) {
+            fclose(f);
+            return ERR_FILE_WRITE;
+        }
+        cur = cur->next;
+    }
+    fclose(f);
+    return OK;
+}
+
+void print_list(const Liver *head) {
+    if (!head) { printf("[Список пуст]\n"); return; }
+    int i = 0;
+    const Liver *cur = head;
+    while (cur) {
+        printf("%2d) %s %s %s | %02d.%02d.%04d | %c | %.2f\n",
+               ++i, cur->surname, cur->name,
+               cur->patronymic[0] ? cur->patronymic : "-",
+               cur->birth.day, cur->birth.month, cur->birth.year,
+               cur->gender, cur->salary);
+        cur = cur->next;
+    }
+}
+
+void newline(char *s) {
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n')) s[--n] = '\0';
+}
+
+Status input_liver(Liver *out) {
+    char line[MAX_FILE];
+    printf("Фамилия: ");
+    if (!fgets(line, sizeof(line), stdin)) return ERR_INVALID_INPUT;
+    newline(line);
+    if (validate_name(line, 0) != OK) return ERR_INVALID_INPUT;
+    strncpy(out->surname, line, MAX_NAME - 1); out->surname[MAX_NAME - 1] = 0;
+
+    printf("Имя: ");
+    if (!fgets(line, sizeof(line), stdin)) return ERR_INVALID_INPUT;
+    newline(line);
+    if (validate_name(line, 0) != OK) return ERR_INVALID_INPUT;
+    strncpy(out->name, line, MAX_NAME - 1); out->name[MAX_NAME - 1] = 0;
+
+    printf("Отчество (можно пусто): ");
+    if (!fgets(line, sizeof(line), stdin)) return ERR_INVALID_INPUT;
+    newline(line);
+    if (validate_name(line, 1) != OK) return ERR_INVALID_INPUT;
+    strncpy(out->patronymic, line, MAX_NAME - 1); out->patronymic[MAX_NAME - 1] = 0;
+
+    printf("Дата рождения (дд мм гггг): ");
+    int d, m, y;
+    if (scanf("%d %d %d", &d, &m, &y) != 3) {
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+        return ERR_INVALID_DATE;
+    }
+    if (valid_date(d, m, y) != OK) {
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+        return ERR_INVALID_DATE;
+    }
+    out->birth.day = d; out->birth.month = m; out->birth.year = y;
+
+    printf("Пол (M/W): ");
+    char g;
+    if (scanf(" %c", &g) != 1) {
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+        return ERR_INVALID_INPUT;
+    }
+    if (g != 'M' && g != 'W') {
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+        return ERR_INVALID_INPUT;
+    }
+    out->gender = g;
+
+    printf("Средний доход: ");
+    double inc;
+    if (scanf("%lf", &inc) != 1) {
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+        return ERR_INVALID_SALARY;
+    }
+    if (validate_salary(inc) != OK) {
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+        return ERR_INVALID_SALARY;
+    }
+    out->salary = inc;
+    out->next = NULL;
+
+    int c; while ((c = getchar()) != '\n' && c != EOF) {}
+    return OK;
+}
+
+void print_menu(void) {
+    printf("\n===== МЕНЮ =====\n");
+    printf("1. Показать всех\n");
+    printf("2. Добавить жителя\n");
+    printf("3. Найти жителя\n");
+    printf("4. Изменить жителя\n");
+    printf("5. Удалить жителя\n");
+    printf("6. Отменить последние N/2 модификаций (Undo)\n");
+    printf("7. Сохранить в файл\n");
+    printf("8. Выход\n");
+    printf("Выбор: ");
+}
+
+Status find_and_report(const AppContext *ctx, const Liver *key) {
+    Liver *found = find_liver(ctx->head, key);
+    if (!found) return ERR_NOT_FOUND;
+    printf("Найдено: %s %s %s | %02d.%02d.%04d | %c | %.2f\n",
+           found->surname, found->name,
+           found->patronymic[0] ? found->patronymic : "-",
+           found->birth.day, found->birth.month, found->birth.year,
+           found->gender, found->salary);
+    return OK;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Использование: %s <файл_с_жителями>\n", argv[0]);
+        return 1;
+    }
+
+    const char *input_path = argv[1];
+    AppContext ctx = { NULL, 0, NULL, 0 };
+
+    Status st = load_from_file(&ctx, input_path);
+    if (st != OK) {
+        fprintf(stderr, "Ошибка загрузки файла (код %d)\n", st);
+        free_list(ctx.head);
+        clear_undo(&ctx.undo_stack);
+        return 1;
+    }
+    printf("Загружено жителей: %d\n", ctx.count);
+
+    int running = 1;
+    while (running) {
+        print_menu();
+        int choice;
+        if (scanf("%d", &choice) != 1) {
+            int c; while ((c = getchar()) != '\n' && c != EOF) {}
+            printf("Некорректный выбор\n");
+            continue;
+        }
+        int c; while ((c = getchar()) != '\n' && c != EOF) {}
+
+        switch (choice) {
+            case 1: print_list(ctx.head); break;
+
+            case 2: {
+                Liver tmp;
+                st = input_liver(&tmp);
+                if (st != OK) { printf("Ошибка ввода (%d)\n", st); break; }
+                if (find_liver(ctx.head, &tmp)) {
+                    printf("Такой житель уже есть\n"); break;
+                }
+                Liver *copy = copy_liver(&tmp);
+                if (!copy) { printf("Нет памяти\n"); break; }
+                Status ist = insert(&ctx.head, copy);
+                if (ist != OK) { free_liver(copy); printf("Ошибка вставки (%d)\n", ist); break; }
+                ctx.count++;
+                Liver *undo_copy = copy_liver(&tmp);
+                if (!undo_copy) { printf("Нет памяти для undo\n"); break; }
+                push_mod(&ctx.undo_stack, MOD_ADD, undo_copy, 0, NULL);
+                ctx.mod_count++;
+                printf("Добавлено\n");
+                break;
+            }
+
+            case 3: {
+                Liver key;
+                printf("Введите параметры для поиска:\n");
+                st = input_liver(&key);
+                if (st != OK) { printf("Ошибка ввода (%d)\n", st); break; }
+                if (find_and_report(&ctx, &key) != OK)
+                    printf("Не найдено\n");
+                break;
+            }
+
+            case 4: {
+                Liver key;
+                printf("Введите жителя для изменения (текущие данные):\n");
+                st = input_liver(&key);
+                if (st != OK) { printf("Ошибка ввода (%d)\n", st); break; }
+                Liver *found = find_liver(ctx.head, &key);
+                if (!found) { printf("Не найдено\n"); break; }
+                printf("Введите новые данные:\n");
+                Liver neu;
+                st = input_liver(&neu);
+                if (st != OK) { printf("Ошибка ввода (%d)\n", st); break; }
+
+                Liver *old_copy = copy_liver(found);
+                Liver *new_copy = copy_liver(&neu);
+                if (!old_copy || !new_copy) {
+                    if (old_copy) free_liver(old_copy);
+                    if (new_copy) free_liver(new_copy);
+                    printf("Нет памяти\n");
+                    break;
+                }
+
+                delete_liver(&ctx.head, found);
+                free_liver(found);
+
+                Liver *ins = copy_liver(&neu);
+                if (!ins) {
+                    free_liver(old_copy);
+                    free_liver(new_copy);
+                    printf("Нет памяти\n");
+                    break;
+                }
+                Status ist = insert(&ctx.head, ins);
+                if (ist != OK) {
+                    free_liver(ins);
+                    free_liver(old_copy);
+                    free_liver(new_copy);
+                    printf("Ошибка вставки (%d)\n", ist);
+                    break;
+                }
+
+                push_mod(&ctx.undo_stack, MOD_UPDATE, new_copy, 0, old_copy);
+                ctx.mod_count++;
+                printf("Изменено\n");
+                break;
+            }
+
+            case 5: {
+                Liver key;
+                printf("Введите жителя для удаления:\n");
+                st = input_liver(&key);
+                if (st != OK) { printf("Ошибка ввода (%d)\n", st); break; }
+                Liver *found = find_liver(ctx.head, &key);
+                if (!found) { printf("Не найдено\n"); break; }
+                Liver *copy_for_undo = copy_liver(found);
+                if (!copy_for_undo) { printf("Нет памяти\n"); break; }
+                delete_liver(&ctx.head, found);
+                ctx.count--;
+                push_mod(&ctx.undo_stack, MOD_DELETE, copy_for_undo, 0, NULL);
+                ctx.mod_count++;
+                free_liver(found);
+                printf("Удалено\n");
+                break;
+            }
+
+            case 6: {
+                st = do_undo(&ctx);
+                if (st == ERR_UNDO_EMPTY)
+                    printf("Нечего отменять (N/2 = 0)\n");
+                else
+                    printf("Отменено\n");
+                break;
+            }
+
+            case 7: {
+                char path[MAX_FILE];
+                printf("Путь к файлу: ");
+                if (!fgets(path, sizeof(path), stdin)) break;
+                newline(path);
+
+                st = save_to_file(ctx.head, path, input_path);
+                switch (st) {
+                    case OK:
+                        printf("Сохранено\n");
+                        break;
+                    case ERR_INVALID_INPUT:
+                        printf("Ошибка: нельзя перезаписать входной файл\n");
+                        break;
+                    case ERR_FILE_OPEN:
+                        printf("Ошибка открытия файла\n");
+                        break;
+                    case ERR_FILE_WRITE:
+                        printf("Ошибка записи\n");
+                        break;
+                    default:
+                        printf("Неизвестная ошибка (%d)\n", st);
+                }
+                break;
+            }
+
+            case 8: running = 0; break;
+
+            default: printf("Неверный выбор\n");
+        }
+    }
+
+    free_list(ctx.head);
+    clear_undo(&ctx.undo_stack);
+    return 0;
+}
